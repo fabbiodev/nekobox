@@ -5,6 +5,9 @@ file(GLOB_RECURSE PLATFORM_SOURCES_GLOB
     ${NYXARIA}/sys/windows/*.h
 )
 set(PLATFORM_SOURCES ${PLATFORM_SOURCES_GLOB})
+list(REMOVE_ITEM PLATFORM_SOURCES
+    ${CMAKE_SOURCE_DIR}/${GHARQAD}/sys/windows/PacketFilter.cpp
+    ${CMAKE_SOURCE_DIR}/${NYXARIA}/sys/windows/PacketFilter.hpp)
 
 set(PLATFORM_LIBRARIES
     wininet wsock32 ws2_32 user32 shell32 rasapi32 iphlpapi ntdll wbemuuid

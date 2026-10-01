@@ -239,7 +239,7 @@ jobs:
           GO_MOD_TIDY=ON GOOS=${{ matrix.cross_os }} GOARCH=${{ matrix.cross_arch }} ./script/build_go.sh
 
       - name: Build vendor
-        if: matrix.cross_os == 'public'
+        if: matrix.cross_os == 'public' && github.event.inputs.binary_only != 'true'
         shell: bash
         run: |
           env INPUT_VERSION=${{ needs.get-tag-and-changelog.outputs.tag }} bash -x ./script/deploy_vendor.sh
@@ -267,10 +267,10 @@ jobs:
           fi
           gh release upload "${INPUT_VERSION}" "${release_files[@]}" --clobber
       - name: Tar files
-        if: matrix.cross_os == 'public' || ( github.event.inputs.source_only  != 'true' && matrix.allow == 'true' )
+        if: (matrix.cross_os == 'public' && github.event.inputs.binary_only != 'true') || ( github.event.inputs.source_only != 'true' && matrix.allow == 'true' )
         run: tar czvf artifacts.tgz ./deployment
       - name: Uploading Artifact
-        if: matrix.cross_os == 'public' || ( github.event.inputs.source_only  != 'true' && matrix.allow == 'true' )
+        if: (matrix.cross_os == 'public' && github.event.inputs.binary_only != 'true') || ( github.event.inputs.source_only != 'true' && matrix.allow == 'true' )
         uses: actions/upload-artifact@main
         with:
           name: nekobox-${{ github.sha }}-Common-${{ matrix.cross_os }}-${{ matrix.cross_arch }}
@@ -482,25 +482,6 @@ jobs:
           modules: qtcharts
           cache-key-prefix: QtCache-${{ matrix.platform }}-${{ matrix.target }}
 
-      - name: Prepare Windows Packet Filter runtime
-        if: matrix.allow == 'true'
-        shell: pwsh
-        run: |
-          $assetArch = switch ('${{ matrix.target }}') {
-            'x86_64' { 'x64' }
-            'x86' { 'x86' }
-            'arm64' { 'ARM64' }
-            default { throw 'Unsupported packet-filter architecture' }
-          }
-          $runtime = Join-Path $env:GITHUB_WORKSPACE '.packet-filter-runtime'
-          New-Item -ItemType Directory -Force -Path $runtime | Out-Null
-
-          $driverName = "Windows.Packet.Filter.3.6.2.1.$assetArch.msi"
-          $driverUrl = "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/$driverName"
-          Invoke-WebRequest -Uri $driverUrl -OutFile (Join-Path $runtime $driverName)
-
-          "PACKET_FILTER_RUNTIME_DIR=$runtime" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          
       - name: Windows - Generate MakeFile and Build
         if: matrix.allow == 'true'
         shell: bash
@@ -651,7 +632,13 @@ jobs:
           GUEST_ARCH: ${{ matrix.target }}
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
+          CORE_REPO_DEPLOY_KEY: ${{ secrets.CORE_REPO_DEPLOY_KEY }}
         run: |
+          set -euo pipefail
+          test -n "$CORE_REPO_DEPLOY_KEY"
+          export CORE_REPO_DEPLOY_KEY_PATH="$RUNNER_TEMP/nekobox-core-deploy-key"
+          printf '%s\n' "$CORE_REPO_DEPLOY_KEY" > "$CORE_REPO_DEPLOY_KEY_PATH"
+          chmod 600 "$CORE_REPO_DEPLOY_KEY_PATH"
           if [[ ${{ github.event.inputs.skip_updater }} == 'true' ]]; then export SKIP_UPDATE_BUTTON=ON; else export SKIP_UPDATE_BUTTON=OFF; fi
           echo "UNAME=${GOARCH}" >> .ENV
           echo "GOARCH=${GOARCH}" >> .ENV

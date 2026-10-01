@@ -885,29 +885,6 @@ FunctionEnd
 !define WriteToFile `!insertmacro WriteToFile false`
 !define WriteLineToFile `!insertmacro WriteToFile true`
 
-Function InstallNetworkFilter
-    FindFirst $1 $2 "$INSTDIR\packetfilter\Windows.Packet.Filter*.msi"
-    ${If} "$2" == ""
-        DetailPrint "Nekobox Network Filter MSI was not included in this package"
-        FindClose $1
-        Return
-    ${EndIf}
-
-    DetailPrint "Installing or repairing Nekobox Network Filter adapter..."
-    nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install_packet_filter.ps1" -MsiPath "$INSTDIR\packetfilter\$2" -RenameScript "$INSTDIR\rename_packet_filter.ps1" -Reinstall'
-    Pop $3
-    ${If} $3 == 0
-    ${OrIf} $3 == 3010
-    ${OrIf} $3 == 1641
-        WriteRegStr HKLM "Software\NekoBox" "NetworkFilterInstalled" "1"
-        WriteRegStr HKLM "SYSTEM\CurrentControlSet\Services\ndisrd" "DisplayName" "Nekobox Network Filter"
-        WriteRegStr HKLM "SYSTEM\CurrentControlSet\Services\ndisrd" "Description" "Nekobox Network Filter"
-    ${Else}
-        DetailPrint "Nekobox Network Filter installation returned $3; see packetfilter-install.log"
-    ${EndIf}
-    FindClose $1
-FunctionEnd
-
 Function un.RemoveNetworkFilter
     ReadRegStr $3 HKLM "Software\NekoBox" "NetworkFilterInstalled"
     nsExec::ExecToLog 'netcfg.exe -q nt_ndisrd'
@@ -929,6 +906,24 @@ Function un.RemoveNetworkFilter
 FunctionEnd
 
 Section "Install"
+
+  ; Remove a previously installed filter before replacing older NekoBox files.
+  ; This is migration cleanup only; the new package contains no filter driver.
+  ReadRegStr $0 HKLM "Software\NekoBox" "NetworkFilterInstalled"
+  ${If} "$0" == "1"
+    FindFirst $1 $2 "$INSTDIR\packetfilter\Windows.Packet.Filter*.msi"
+    ${If} "$2" != ""
+      nsExec::ExecToLog 'msiexec.exe /x "$INSTDIR\packetfilter\$2" /passive /norestart'
+      Pop $3
+    ${EndIf}
+    FindClose $1
+    nsExec::ExecToLog 'netcfg.exe -v -u nt_ndisrd'
+    Pop $3
+    DeleteRegValue HKLM "Software\NekoBox" "NetworkFilterInstalled"
+  ${EndIf}
+  RMDir /r "$INSTDIR\packetfilter"
+  Delete "$INSTDIR\install_packet_filter.ps1"
+  Delete "$INSTDIR\rename_packet_filter.ps1"
 
   !insertmacro "checkVcRedist"
   
@@ -988,10 +983,6 @@ Section "Install"
     File /r  ".\deployment\windows64\*"
   !endif
   ${EndIf}
-
-  File ".\script\rename_packet_filter.ps1"
-  File ".\script\install_packet_filter.ps1"
-  Call InstallNetworkFilter
 
   ${If} "$Winget" == "1"
     WriteINIStr "$INSTDIR\global.ini" "General" "winget_package" "true"

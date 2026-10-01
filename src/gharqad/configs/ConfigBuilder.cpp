@@ -496,21 +496,16 @@ BuildConfig(const std::shared_ptr<ProxyEntity> &ent, bool forTest,
       if (!status->forTest) {
         QJsonArray clientInbounds;
         if (IsValidPort(dataStore->inbound_socks_port) &&
-            (Configs::dataStore->proxyInboundEnabled() ||
-             dataStore->spmode_packet_filter)) {
+            Configs::dataStore->proxyInboundEnabled()) {
           QJsonObject inboundObj;
           inboundObj["tag"] = "mixed-in";
           inboundObj["type"] =
 #ifdef USE_CPP_PROXY_CONFIGURATOR
-              "mixed"
+              "mixed";
 #else
-              (dataStore->spmode_packet_filter
-                   ? QString("mixed")
-                   : (QString)*Configs::dataStore->inbound_proxy_type);
+              (QString)*Configs::dataStore->inbound_proxy_type;
 #endif
-          inboundObj["listen"] = dataStore->spmode_packet_filter
-                                      ? QString("127.0.0.1")
-                                      : dataStore->inbound_address;
+          inboundObj["listen"] = dataStore->inbound_address;
           inboundObj["listen_port"] = dataStore->inbound_socks_port;
           auto &uname = dataStore->inbound_username;
           auto &upass = dataStore->inbound_password;
@@ -1756,23 +1751,18 @@ skip_multiple_jobs:
   if (IsValidPort(dataStore->inbound_socks_port) &&
       (!status->forTest || blockAll)
 #ifndef USE_CPP_PROXY_CONFIGURATOR
-      && (Configs::dataStore->proxyInboundEnabled() ||
-          dataStore->spmode_packet_filter)
+      && Configs::dataStore->proxyInboundEnabled()
 #endif
   ) {
     QJsonObject inboundObj;
     inboundObj["tag"] = "mixed-in";
     inboundObj["type"] =
 #ifdef USE_CPP_PROXY_CONFIGURATOR
-        "mixed"
+        "mixed";
 #else
-        (dataStore->spmode_packet_filter
-             ? QString("mixed")
-             : (QString)*Configs::dataStore->inbound_proxy_type);
+        (QString)*Configs::dataStore->inbound_proxy_type;
 #endif
-    inboundObj["listen"] = dataStore->spmode_packet_filter
-                                ? QString("127.0.0.1")
-                                : dataStore->inbound_address;
+    inboundObj["listen"] = dataStore->inbound_address;
     inboundObj["listen_port"] = dataStore->inbound_socks_port;
     QString &inbound_username = dataStore->inbound_username;
     QString &inbound_password = dataStore->inbound_password;

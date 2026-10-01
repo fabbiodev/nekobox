@@ -3,7 +3,6 @@ source script/env_deploy.sh
 pushd "$SRC_ROOT"
 
 pushd core/server
-./go_init.sh
 
 if [[ ! -f srslist.json ]]
 then
@@ -14,7 +13,7 @@ go list -m -f '{{.Version}}' github.com/sagernet/sing-box > "$SRC_ROOT/SingBox.V
 
 popd
 
-for i in server updater
+for i in updater
 do
 pushd "core/$i"
 go mod tidy
@@ -37,7 +36,7 @@ rm -fv **/*.so
 rm -fv **/*.a
 rm -fv **/*.dll
 
-git add -f srslist.json global.ini core/{server,updater}/vendor SingBox.Version
+git add -f srslist.json global.ini core/updater/vendor SingBox.Version
 git -c user.name="a" -c user.email="my@email.org" commit -am "New Update"
 
 
@@ -51,7 +50,7 @@ sha256sum "$DEPLOYMENT/$archive_standalone.tar.xz" > "$DEPLOYMENT/$archive_stand
 
 
 git reset --soft HEAD^1
-for i in srslist.json global.ini core/{server,updater}/vendor SingBox.Version
+for i in srslist.json global.ini core/updater/vendor SingBox.Version
 do
 git rm -rf "$i"
 rm -rf "$i"

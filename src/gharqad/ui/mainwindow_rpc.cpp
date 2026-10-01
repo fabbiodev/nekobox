@@ -5,7 +5,6 @@
 #include <nekobox/ui/mainwindow.h>
 #include <nekobox/dataStore/Database.hpp>
 #include <nekobox/configs/ConfigBuilder.hpp>
-#include <nekobox/ui/setting/GameModCatalog.h>
 #include <nekobox/sys/Settings.h>
 #include <nekobox/dataStore/Utils.hpp>
 #include <nekobox/stats/traffic/TrafficLooper.hpp>
@@ -716,128 +715,6 @@ void MainWindow::profile_start(int _id, bool do_not_test) {
         Configs::dataStore->UpdateStartedId(ent->id);
         running = ent;
 
-#ifdef Q_OS_WIN
-        if (Configs::dataStore->spmode_packet_filter) {
-            QStringList excludedProcesses{
-                QFileInfo(QCoreApplication::applicationFilePath()).fileName(),
-                "nekobox.exe", "nekobox_core.exe"};
-            const auto corePath = Configs::FindCoreRealPath();
-            if (!corePath.isEmpty())
-                excludedProcesses.append(QFileInfo(corePath).fileName());
-
-            const auto addUnique = [](QStringList &list, const QString &name) {
-                const auto trimmed = name.trimmed();
-                if (!trimmed.isEmpty() &&
-                    !list.contains(trimmed, Qt::CaseInsensitive))
-                    list.append(trimmed);
-            };
-
-            // The native packet filter decides which applications reach the
-            // proxy by process name; sing-box never sees the originating
-            // process in Packet Filter mode. Build the intercept list from
-            // applications routed through proxy and the bypass list from
-            // applications marked Direct.
-            QStringList includedProcesses;
-            const auto &enabledServices =
-                Configs::dataStore->routing->game_mod_enabled_services;
-            for (const auto &name :
-                 GameMod::ProcessNamesForOutbound(enabledServices, "proxy"))
-                addUnique(includedProcesses, name);
-            for (const auto &name :
-                 GameMod::ProcessNamesForOutbound(enabledServices, "direct"))
-                addUnique(excludedProcesses, name);
-
-            if (Configs::dataStore->routing->tun_split != nullptr) {
-                for (const auto &processPath :
-                     Configs::dataStore->routing->tun_split->proxy)
-                    // Keep a configured full path intact. The native matcher
-                    // supports both exact process names and path substrings;
-                    // reducing paths to a basename can route an unrelated
-                    // executable with the same filename.
-                    addUnique(includedProcesses, processPath);
-                for (const auto &processPath :
-                     Configs::dataStore->routing->tun_split->direct)
-                    addUnique(excludedProcesses, processPath);
-            }
-
-            // In Packet Filter mode sing-box receives the redirected socket
-            // from nekobox.exe, so its own process selectors cannot identify
-            // the original application. Mirror process selectors from the
-            // active routing profile into the native filter. A process rule
-            // targeting proxy (or another real outbound) must be intercepted;
-            // Direct rules are excluded so they stay on the physical adapter.
-            const auto appendRuleProcesses = [&](const auto &rule,
-                                                  QStringList &target) {
-                for (const auto &name : rule->process_name)
-                    addUnique(target, name);
-                for (const auto &path : rule->process_path)
-                    addUnique(target, path);
-                // process_path_regex has no equivalent in the native filter;
-                // keep it in sing-box for TUN mode instead of broad matching.
-            };
-            auto routeChain = Configs::profileManager->GetRouteChain(
-                Configs::dataStore->routing->current_route_id);
-            if (routeChain == nullptr) {
-                const auto enabledRoutes =
-                    Configs::profileManager->GetEnabledRouteChains();
-                if (!enabledRoutes.isEmpty())
-                    routeChain = enabledRoutes.first();
-            }
-            if (routeChain != nullptr) {
-                for (const auto &rule : routeChain->Rules) {
-                    if (rule == nullptr ||
-                        (rule->process_name.isEmpty() &&
-                         rule->process_path.isEmpty()))
-                        continue;
-
-                    const bool isDirect =
-                        rule->action == "route" &&
-                        rule->outboundID == Configs::directID;
-                    const bool isBlock =
-                        rule->action == "reject" ||
-                        (rule->action == "route" &&
-                         rule->outboundID == Configs::blockID);
-                    if (isDirect || isBlock) {
-                        // The native backend has no process-level reject
-                        // operation. Keeping a Block selector direct avoids
-                        // unexpectedly forcing it through the proxy.
-                        appendRuleProcesses(rule, excludedProcesses);
-                    } else {
-                        appendRuleProcesses(rule, includedProcesses);
-                    }
-                }
-            }
-
-            QString filterError;
-            if (!packet_filter->start(
-                    Configs::dataStore->inbound_socks_port,
-                    Configs::dataStore->inbound_username,
-                    Configs::dataStore->inbound_password, includedProcesses,
-                    excludedProcesses, &filterError)) {
-                packet_filter->stop();
-                Configs::dataStore->spmode_packet_filter = false;
-                Configs::dataStore->remember_spmode.removeAll("packet_filter");
-                Configs::dataStore->Save();
-                packet_filter_failure_pending = false;
-                bool stopOK = false;
-                defaultClient->Stop(&stopOK);
-                Stats::trafficLooper->loop_enabled = false;
-                Stats::connection_lister->suspend = true;
-                Configs::dataStore->UpdateStartedId(-1919);
-                running = nullptr;
-                runOnUiThread([=, this] {
-                    refresh_status();
-                    QMessageBox::warning(
-                        this, tr("Packet Filter"),
-                        tr("Packet Filter could not be started: %1")
-                            .arg(filterError));
-                });
-                return false;
-            }
-            packet_filter_failure_pending = false;
-        }
-#endif
-
         runOnUiThread([=, this] {
             refresh_status();
             refresh_proxy_list(ent->id);
@@ -917,8 +794,6 @@ void MainWindow::profile_start(int _id, bool do_not_test) {
 }
 
 bool MainWindow::set_spmode_system_proxy(bool enable, bool save) {
-    if (enable && Configs::dataStore->spmode_packet_filter)
-        set_spmode_packet_filter(false, false, false);
     #ifndef USE_CPP_PROXY_CONFIGURATOR
     bool isok = true;
     int inbound_proxy_type = Configs::dataStore->inbound_proxy_type->value;
@@ -968,66 +843,6 @@ bool MainWindow::set_spmode_system_proxy(bool enable, bool save) {
     return enable;
 }
 
-bool MainWindow::set_spmode_packet_filter(bool enable, bool save,
-                                           bool requestAdmin) {
-#ifndef Q_OS_WIN
-    Q_UNUSED(enable);
-    Q_UNUSED(save);
-    Q_UNUSED(requestAdmin);
-    return false;
-#else
-    if (enable == Configs::dataStore->spmode_packet_filter) {
-        if (!enable) {
-            if (packet_filter)
-                packet_filter->stop();
-            return false;
-        }
-        if (!Configs::dataStore->spmode_system_proxy &&
-            !Configs::dataStore->spmode_vpn)
-            return true;
-    }
-
-    // Packet filtering replaces TUN/system-proxy interception. Keeping one
-    // interception layer avoids loops and double proxying.
-    if (enable) {
-        if (Configs::dataStore->spmode_system_proxy &&
-            set_spmode_system_proxy(false, false)) {
-            MW_show_log(tr("Packet Filter was not enabled because the system proxy could not be cleared."));
-            refresh_status();
-            return false;
-        }
-        if (Configs::dataStore->spmode_vpn)
-            set_spmode_vpn(false, false, false);
-        Configs::dataStore->remember_spmode.removeAll("system_proxy");
-        Configs::dataStore->remember_spmode.removeAll("vpn");
-    }
-
-    Configs::dataStore->spmode_packet_filter = enable;
-    if (enable)
-        packet_filter_failure_pending = false;
-    if (!enable)
-        Configs::dataStore->remember_spmode.removeAll("packet_filter");
-    if (save) {
-        if (enable && Configs::windowSettings->remember_last_profile)
-            Configs::dataStore->remember_spmode.append("packet_filter");
-        Configs::dataStore->Save();
-    }
-
-    if (!enable && packet_filter)
-        packet_filter->stop();
-    if (!enable)
-        packet_filter_failure_pending = false;
-
-    if (requestAdmin) {
-        refresh_status();
-        if (Configs::dataStore->started_id >= 0)
-            profile_start(Configs::dataStore->started_id,
-                          !Configs::windowSettings->test_after_start);
-    }
-    return enable;
-#endif
-}
-
 void MainWindow::profile_stop(bool crash, bool block, bool manual) {
     if (running == nullptr) {
         return;
@@ -1035,10 +850,6 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
     auto id = running->id;
 
     auto profile_stop_stage2 = [=,this] {
-#ifdef Q_OS_WIN
-        if (packet_filter)
-            packet_filter->stop();
-#endif
         if (!crash) {
             bool rpcOK;
             QString error = defaultClient->Stop(&rpcOK);

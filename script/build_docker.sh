@@ -17,13 +17,27 @@ fi
 
 if [[ -d download-artifact && "$SKIP_BUILD_GO" != yes ]]
 then
-(
- cd download-artifact
- cd *public-public ||:
- tar xvzf artifacts.tgz -C .
- mkdir -p "$DEPLOYMENT" ||:
- mv deployment/* $DEPLOYMENT
-) ||:
+ for source_artifact in download-artifact/*-Common-public-public; do
+   if [[ -f "$source_artifact/artifacts.tgz" ]]; then
+     (
+       cd "$source_artifact"
+       tar xvzf artifacts.tgz -C .
+       mkdir -p "$DEPLOYMENT"
+       mv deployment/* "$DEPLOYMENT"
+     )
+   fi
+ done
+fi
+
+# Binary-only releases build directly from the checked-out Go module. Mount
+# the deploy key at runtime; never copy it into the public source artifact.
+if [[ -s /run/secrets/nekobox_core_key ]]; then
+  install -d -m 700 /root/.ssh
+  ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts
+  export GIT_SSH_COMMAND="ssh -i /run/secrets/nekobox_core_key -o IdentitiesOnly=yes -o UserKnownHostsFile=/root/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+  git config --global url."git@github.com:1maxwarner/nekobox-sing-box-core".insteadOf "https://github.com/1maxwarner/nekobox-sing-box-core"
+  export GOPRIVATE=github.com/1maxwarner/nekobox-sing-box-core
+  export GONOSUMDB=github.com/1maxwarner/nekobox-sing-box-core
 fi
 
 echo $archive_standalone
@@ -37,7 +51,9 @@ then
    export SRC_ROOT=$PWD/$archive_standalone
    ln *.AppImage "$SRC_ROOT" ||:
 #   BUILD="$SRC_ROOT/build"
-   export GOFLAGS="-mod=vendor $GOFLAGS"
+   if [[ -d "$SRC_ROOT/core/server/vendor" ]]; then
+     export GOFLAGS="-mod=vendor $GOFLAGS"
+   fi
    export VERSION_SINGBOX="$(cat $SRC_ROOT/SingBox.Version)"
    export LAST_ACTION='rm -rf "$SRC_ROOT"'
    popd

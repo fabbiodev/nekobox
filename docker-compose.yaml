@@ -9,5 +9,6 @@ services:
     dockerfile: Dockerfile
   volumes:
     - .:/app:rw,Z,U   # bind current directory to /app in container
+    - ${CORE_REPO_DEPLOY_KEY_PATH:-/dev/null}:/run/secrets/nekobox_core_key:ro
   working_dir: /app
   tty: true    # optional, keeps container running for interactive shell

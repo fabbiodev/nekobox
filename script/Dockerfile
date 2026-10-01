@@ -19,7 +19,7 @@ RUN set -eux; \
         bash cmake git ninja jq curl ccache wget sed util-linux coreutils shadow squashfs-tools \
         qt6-base-devel thrift-devel openssl-devel boost-devel lmdb-devel acl-devel libunistring-devel \
         libcurl-devel libzstd-devel patchelf pkg-config qt6-base qt6-tools go thrift base-devel \
-        tar xz which file yaml-cpp-devel leveldb-devel; then \
+        tar xz which file openssh yaml-cpp-devel leveldb-devel; then \
         installed=1; \
         break; \
       fi; \

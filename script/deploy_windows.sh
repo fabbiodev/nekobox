@@ -69,11 +69,6 @@ cp "$rel/$nekoray.exe" "$DEST"
 #cp "$rel/elevated_launcher.exe" "$DEST"
 touch "$rel/nekobox.dll"
 cp "$rel/"*.dll  "$DEST"
-if [[ -d "$rel/packetfilter" ]]
-then
-  mkdir -p "$DEST/packetfilter"
-  cp -RT "$rel/packetfilter" "$DEST/packetfilter"
-fi
 
 [[ -f "$BUILD/nekobox_core.exe" ]] && cp "$BUILD/nekobox_core.exe" "$DEST" 
 [[ -f "$BUILD/updater.exe" ]] && cp "$BUILD/updater.exe" "$DEST"

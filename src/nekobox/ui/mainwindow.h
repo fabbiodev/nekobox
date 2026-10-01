@@ -22,7 +22,6 @@
 #include <3rdparty/qv2ray/v2/ui/widgets/speedchart/SpeedWidget.hpp>
 #include <nekobox/ui/setting/QuickRoutesWidget.h>
 
-#include <nekobox/sys/windows/PacketFilter.hpp>
 
 #ifdef Q_OS_UNIX
 #include <QtDBus>
@@ -218,8 +217,6 @@ public:
 
     void set_spmode_vpn(bool enable, bool save = true, bool requestAdmin = true);
 
-    bool set_spmode_packet_filter(bool enable, bool save = true,
-                                   bool requestAdmin = true);
 
     bool get_elevated_permissions(int reason = 3, void * pointer = nullptr);
 
@@ -387,8 +384,6 @@ private:
     int suspendedProfileId = -1;
     qint64 vpn_pid = 0;
 #ifdef Q_OS_WIN
-    std::unique_ptr<Configs_sys::PacketFilterController> packet_filter;
-    std::atomic_bool packet_filter_failure_pending = false;
 #endif
     //
     QCheckBox *logAutoScrollCheckBox = nullptr;
