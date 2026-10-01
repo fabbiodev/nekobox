@@ -1,3 +1,7 @@
 - fix: route AmneziaWG userspace UDP sessions through the virtual AWG address with an ephemeral local port
 - fix: prevent Discord voice UDP flows from colliding with `port is in use` and hanging at RTC Connecting
 - test: add an AmneziaWG netstack regression test for IPv4 and IPv6 UDP source binding
+- fix: avoid crash when traffic profile is missing
+- feat: update sing-box to 1.13.19
+- feat: update mieru to 3.36.0
+- feat: add log error filter and quick route add from log

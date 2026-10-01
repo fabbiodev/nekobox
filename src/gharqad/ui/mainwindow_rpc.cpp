@@ -19,7 +19,11 @@
 #include <QPushButton>
 #include <QDesktopServices>
 #include <QMessageBox>
+#include <QSemaphore>
 #include <QStringList>
+#include <QCoreApplication>
+#include <QEventLoop>
+#include <QThread>
 
 
 #ifndef NKR_SOFTWARE_KEYS
@@ -887,10 +891,14 @@ void MainWindow::profile_start(int _id, bool do_not_test) {
         delete mutex;
         // do start
         MW_show_log(">>>>>>>> " + tr("Starting profile %1").arg(ent->DisplayTypeAndName()));
-        this->ui->start_stop_button->setState(Icon::State::CONNECTING);
+        runOnUiThread([this] {
+            this->ui->start_stop_button->setState(Icon::State::CONNECTING);
+        });
         if (!profile_start_stage2()) {
             MW_show_log("<<<<<<<< " + tr("Failed to start profile %1").arg(ent->DisplayTypeAndName()));
-            this->ui->start_stop_button->setState(Icon::State::IDLE);
+            runOnUiThread([this] {
+                this->ui->start_stop_button->setState(Icon::State::IDLE);
+            });
         }
         mu_starting.unlock();
         if (!do_not_test) {
@@ -1049,8 +1057,10 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
     if (!mu_stopping.tryLock()) {
         return;
     }
-    QMutex blocker;
-    if (block) blocker.lock();
+    // Handing a QMutex from the thread that locked it to another thread to
+    // unlock is an error in Qt and could leave the caller waiting forever,
+    // a semaphore is the primitive meant to be released across threads.
+    QSemaphore blocker;
 
     // timeout message
     auto restartMsgbox = new QMessageBox(QMessageBox::Question, software_name, tr("If there is no response for a long time, it is recommended to restart the software."),
@@ -1065,7 +1075,9 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
     Stats::trafficLooper->UpdateAll();
     for (const auto &item: Stats::trafficLooper->items) {
         if (item->id < 0) continue;
-        Configs::profileManager->GetProfile(item->id)->Save();
+        auto profile = Configs::profileManager->GetProfile(item->id);
+        if (profile == nullptr) continue;
+        profile->Save();
         refresh_proxy_list(item->id);
     }
     Stats::trafficLooper->loop_mutex.unlock();
@@ -1074,20 +1086,24 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
     restartMsgboxTimer->deleteLater();
     restartMsgbox->deleteLater();
 
+    const auto stoppingName = running->DisplayTypeAndName();
+    ui->start_stop_button->setState(Icon::State::DISCONNECTING);
+
     runOnNewThread([=, this, &blocker] {
         // do stop
-        MW_show_log(">>>>>>>> " + tr("Stopping profile %1").arg(running->DisplayTypeAndName()));
-        this->ui->start_stop_button->setState(Icon::State::DISCONNECTING);
+        MW_show_log(">>>>>>>> " + tr("Stopping profile %1").arg(stoppingName));
         if (!profile_stop_stage2()) {
             MW_show_log("<<<<<<<< " + tr("Failed to stop, please restart the program."));
-            this->ui->start_stop_button->setState(Icon::State::RUNNING);
+            runOnUiThread([this] {
+                ui->start_stop_button->setState(Icon::State::RUNNING);
+            });
         }
 
         if (manual) Configs::dataStore->UpdateStartedId(-1919);
         Configs::dataStore->need_keep_vpn_off = false;
         running = nullptr;
 
-        if (block) blocker.unlock();
+        if (block) blocker.release();
 
         runOnUiThread([=, this] {
             refresh_status();
@@ -1099,7 +1115,14 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
 
     if (block)
     {
-        blocker.lock();
-        blocker.unlock();
+        // Stop() talks to the core and can take seconds. Blocking the GUI
+        // thread here is what Windows reports as "Not Responding".
+        if (QThread::currentThread() == QCoreApplication::instance()->thread()) {
+            while (!blocker.tryAcquire(1, 50)) {
+                QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 50);
+            }
+        } else {
+            blocker.acquire();
+        }
     }
 }

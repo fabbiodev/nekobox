@@ -32,7 +32,7 @@ then
  cd *"$CROSS"
  tar xvzf artifacts.tgz -C .
  mv "deployment/$ARCH/"* "$DEST"
-) ||:
+)
 fi
 
 pushd "$SRC_ROOT"
@@ -77,6 +77,12 @@ fi
 
 [[ -f "$BUILD/nekobox_core.exe" ]] && cp "$BUILD/nekobox_core.exe" "$DEST" 
 [[ -f "$BUILD/updater.exe" ]] && cp "$BUILD/updater.exe" "$DEST"
+
+if [[ ! -s "$DEST/nekobox_core.exe" ]]
+then
+  echo "nekobox_core.exe is missing in $DEST: neither $BUILD nor the golang artifact for $CROSS provided it" >&2
+  exit 1
+fi
 
 if [[ "$NAIVE" != "false" ]]
 then

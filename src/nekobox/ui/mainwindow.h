@@ -20,6 +20,7 @@
 #include <nekobox/stats/connections/connectionLister.hpp>
 #include <nekobox/stats/autotester/ProxyAutoTester.hpp>
 #include <3rdparty/qv2ray/v2/ui/widgets/speedchart/SpeedWidget.hpp>
+#include <nekobox/ui/setting/QuickRoutesWidget.h>
 
 #include <nekobox/sys/windows/PacketFilter.hpp>
 
@@ -182,6 +183,9 @@ public:
 
     void refresh_proxy_list(const int &id = -1);
 
+    // Repaint one profile row without relayouting the whole table.
+    void refresh_proxy_traffic(const int &id);
+
     void show_group(int gid);
 
     void refresh_groups();
@@ -224,6 +228,10 @@ public:
     void handleSystemSuspend();
 
     void handleSystemResume();
+    void rebuildLogView();
+
+    void addLogDomainToRoute(const QString &domain, Configs::simpleAction action,
+                             const QString &matchType);
 
     void menu_server_about_to_show(QMenu * menu);
 
@@ -384,9 +392,16 @@ private:
 #endif
     //
     QCheckBox *logAutoScrollCheckBox = nullptr;
+    QCheckBox *logErrorsOnlyCheckBox = nullptr;
     QToolButton * filterButton = nullptr;
     QToolButton * searchButton = nullptr;
     QTextDocument *qvLogDocument = new QTextDocument(this);
+    struct LogLineEntry {
+        QString text;
+        bool isError = false;
+    };
+    QList<LogLineEntry> logLineBuffer;
+    static constexpr int kMaxLogBufferLines = 2000;
     //
     QString title_error;
     int icon_status = -1;
@@ -407,6 +422,7 @@ private:
     int toolTipID;
     //
     SpeedWidget *speedChartWidget;
+    QuickRoutesWidget *quickRoutesWidget;
     //
     // for data view
     QString softwarePath;

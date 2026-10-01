@@ -6,6 +6,10 @@ Sing-Box command line mode is available now! Just type for additional informatio
 Qt based Desktop cross-platform GUI proxy utility, empowered by [Sing-box](https://github.com/SagerNet/sing-box) <br/>
 Supports Windows 11/10 (arm64, x86_64, x86) / Linux  out of the box.
 
+A terminal front-end ([`nekobox-tui`](src/tui/README.md)) is also included:
+it shares the same configuration directory and `nekobox_core` RPC, so both
+interfaces can be used interchangeably.
+
 <img alt="image" src="https://raw.githubusercontent.com/qr243vbi/qr243vbi_images/refs/heads/nekobox/nekobox.png" />
 
 
@@ -34,7 +38,7 @@ scoop install extras/nekobox
 - [NekoBox repository](https://software.opensuse.org//download.html?project=home%3Aqr243vbi&package=nekobox) for various linux distributions ([openSUSE](https://get.opensuse.org/), [Mageia](https://www.mageia.org/), [Debian](https://www.debian.org/), [Raspbian](https://www.raspberrypi.com/software/), [Ubuntu](https://ubuntu.com/), [openEuler](https://www.openeuler.org/), [Arch](https://archlinux.org/)).
 
 ### COPR repository
-- [NekoBox repository](https://copr.fedorainfracloud.org/coprs/qr243vbi/NekoBox/) for various linux distributions ([RedHat](https://www.redhat.com), [Fedora](https://fedoraproject.org/), [Centos](https://www.centos.org), [Almalinux](https://almalinux.org/)).
+- [NekoBox repository](https://copr.fedorainfracloud.org/coprs/moordjin/packages/) for various linux distributions ([RedHat](https://www.redhat.com), [Fedora](https://fedoraproject.org/), [Centos](https://www.centos.org), [Almalinux](https://almalinux.org/)).
 
 ### openSUSE package
 - [source](https://build.opensuse.org/package/show/openSUSE:Factory/nekobox)
@@ -93,31 +97,32 @@ sudo apt-get install -y nekobox
 
 ## Supported protocols
  
-- SOCKS
+- AmneziaWG
+- AnyTLS
+- Chaining outbounds
+- Custom Config
+- Custom Outbound
+- Extra Core
 - HTTP(S)
-- Shadowsocks
-- Trojan
-- VMess
-- VLESS
 - Hysteria 1
 - Hysteria 2
-- TUIC 
-- AnyTLS
-- ShadowTLS
-- Mieru
 - Juicity
-- TrustTunnel
+- Mieru
 - Naive
-- Wireguard
-- AmneziaWG
-- Tailscale
-- SSH
-- Tor
+- Reality
+- Shadowsocks
+- ShadowTLS
 - Snell
-- Custom Outbound
-- Custom Config
-- Extra Core
-- Chaining outbounds
+- SOCKS
+- SSH
+- Tailscale
+- Tor
+- Trojan
+- TrustTunnel
+- TUIC 
+- VLESS
+- VMess
+- Wireguard
 
 ## Subscription Formats
 
@@ -139,7 +144,7 @@ Supported JSON subscription features include:
 
 - [starifly/NekoBoxForAndroid](https://github.com/starifly/NekoBoxForAndroid)
 - [Thrift](https://thrift.apache.org/)
-- [enfein/mieru](https://github.com/enfein/mbox)
+- [enfein/mieru](https://github.com/enfein/mieru)
 - [SagerNet/sing-box](https://github.com/SagerNet/sing-box)
 - [Qv2ray](https://github.com/Qv2ray/Qv2ray)
 - [Qt](https://www.qt.io/)
