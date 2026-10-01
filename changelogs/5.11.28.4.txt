@@ -7,4 +7,5 @@
 - fix: allow Windows packaging when zip is unavailable
 - fix: support modern REALITY servers requiring hybrid X25519MLKEM768 key share
 - fix: build Linux packages against the patched private core instead of an incompatible upstream fork
+- fix: pin the Linux builder to Go 1.26.1 to avoid Go 1.27 JSON API incompatibility
 - sync: integrate the latest official main while retaining Game Mod, route priorities, and process attribution

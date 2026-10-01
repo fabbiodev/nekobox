@@ -72,7 +72,7 @@ fi
 echo "$SRC_ROOT"
 cd "$SRC_ROOT"
 
-cmake -S "$SRC_ROOT" -B "$BUILD" -GNinja -DNKR_DEFAULT_VERSION="${INPUT_VERSION:-5.0.0}" -DSKIP_UPDATER="${SKIP_UPDATE_BUTTON:-OFF}" -DBUILD_GO_PARTS="${BUILD_GO_PARTS}" -DGOOS="${GOOS}" -DGOARCH="${GOARCH}"
+cmake -S "$SRC_ROOT" -B "$BUILD" -GNinja -DNKR_DEFAULT_VERSION="${INPUT_VERSION:-5.0.0}" -DSKIP_UPDATER="${SKIP_UPDATE_BUTTON:-OFF}" -DBUILD_GO_PARTS="${BUILD_GO_PARTS}" -DGOOS="${GOOS}" -DGOARCH="${GOARCH}" -DGO_EXECUTABLE="$(command -v go)" -DGO_COMPILER="$(command -v go)" -DGOCMD="$(command -v go)"
 cmake --build "$BUILD" -v -j $(nproc)
 (
 . script/deploy_linux64.sh; 
