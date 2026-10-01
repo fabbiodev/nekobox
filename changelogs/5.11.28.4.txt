@@ -3,3 +3,9 @@
 - feat: add Windows Packet Filter mode for transparent TCP/UDP interception
 - feat: package ProxiFyre and the signed NDISAPI driver in Windows builds
 - fix: make Packet Filter, TUN, and System Proxy mutually exclusive and fail closed
+- fix: restore VLESS Reality gRPC compatibility and preserve streams after dial cancellation
+- fix: use the official Hysteria2 transport for single-port Salamander profiles
+- fix: route explicitly proxied private networks through TUN
+- fix: allow Windows packaging when zip is unavailable
+- fix: support modern REALITY servers requiring hybrid X25519MLKEM768 key share
+- sync: integrate the latest official main while retaining Game Mod, route priorities, Packet Filter, and process attribution
