@@ -138,14 +138,24 @@ namespace Stats
 
     void ConnectionLister::update()
     {
+        if (suspend) return;
+        const auto epoch = generation.load();
+        ConnectionSort sort;
+        bool asc;
+        {
+            QMutexLocker lock(&sort_mu);
+            sort = this->sort;
+            asc = this->asc;
+        }
         bool ok;
         std::optional<libcore::ListConnectionsResp> resp = API::defaultClient->ListConnections(&ok);
-        if (!ok)
+        if (!ok || suspend || generation.load() != epoch)
         {
             return;
         }
 
         QMap<QString, ConnectionMetadata> toUpdate;
+        if (lastGeneration != epoch) { state->clear(); lastGeneration = epoch; }
         QMap<QString, ConnectionMetadata> toAdd;
         QSet<QString> newState;
         QList<ConnectionMetadata> sorted;
@@ -207,7 +217,9 @@ namespace Stats
         if (sort == Default)
         {
             runOnUiThread([=,this] {
+                if (suspend || generation.load() != epoch) return;
                 auto m = GetMainWindow();
+                if (!m) return;
                 m->UpdateConnectionList(toUpdate, toAdd);
             });
         } else
@@ -253,7 +265,9 @@ namespace Stats
                     });
             }
             runOnUiThread([=,this] {
+                if (suspend || generation.load() != epoch) return;
                 auto m = GetMainWindow();
+                if (!m) return;
                 m->UpdateConnectionListWithRecreate(sorted);
             });
         }
@@ -266,6 +280,8 @@ namespace Stats
 
     void ConnectionLister::setSort(const ConnectionSort newSort)
     {
+        QMutexLocker lock(&sort_mu);
+        ++generation;
         if (newSort == ByTraffic)
         {
             if (sort == ByDownload && asc)

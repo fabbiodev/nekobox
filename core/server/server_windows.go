@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -583,33 +584,60 @@ func getProcessPath(pid uint32) (string, error) {
 	return windows.UTF16ToString(buf[:size]), nil
 }
 
-func KillPid(pid uint32) {
-	p, err := os.FindProcess(int(pid))
+func KillPid(pid uint32) error {
+	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, pid)
 	if err != nil {
-		fmt.Printf("Killing %d process error: %s\n", pid, err.Error())
+		return err
 	}
-	err = p.Kill()
+	defer windows.CloseHandle(handle)
+	if status, _ := windows.WaitForSingleObject(handle, 0); status == windows.WAIT_OBJECT_0 {
+		return nil
+	}
+	if err = windows.TerminateProcess(handle, 1); err != nil {
+		return err
+	}
+	status, err := windows.WaitForSingleObject(handle, 10000)
 	if err != nil {
-		fmt.Printf("Killing %d process error: %s\n", pid, err.Error())
+		return err
 	}
-
-	fmt.Printf("Killing %d process success\n", pid)
+	if status != windows.WAIT_OBJECT_0 {
+		return fmt.Errorf("process %d is still running after termination", pid)
+	}
+	fmt.Printf("Process %d fully exited\n", pid)
+	return nil
 }
 
-func KillProcesses(prefix string, tags map[uint32]bool) {
+func KillProcesses(prefix string, tags map[uint32]bool) error {
+	if !filepath.IsAbs(prefix) || filepath.Clean(prefix) == filepath.VolumeName(prefix)+string(os.PathSeparator) {
+		return fmt.Errorf("refusing process cleanup for invalid installation directory")
+	}
 	prefix = strings.ToLower(filepath.Clean(prefix))
+	prefix += string(os.PathSeparator) // Do not match a sibling like nekobox-old.
 
 	// Enumerate all PIDs
-	var pids [1024]uint32
+	pids := make([]uint32, 1024)
 	var bytesReturned uint32
 
-	err := windows.EnumProcesses(pids[:], &bytesReturned)
-	if err != nil {
-		panic(err)
+	for {
+		if err := windows.EnumProcesses(pids, &bytesReturned); err != nil {
+			return err
+		}
+		if int(bytesReturned) < len(pids)*4 {
+			break
+		}
+		if len(pids) >= 1<<20 {
+			return fmt.Errorf("too many processes to enumerate safely")
+		}
+		pids = make([]uint32, len(pids)*2)
 	}
 
 	count := bytesReturned / 4
 
+	type targetProcess struct {
+		pid  uint32
+		path string
+	}
+	var targets []targetProcess
 	for i := uint32(0); i < count; i++ {
 		pid := pids[i]
 		if pid == 0 {
@@ -624,10 +652,25 @@ func KillProcesses(prefix string, tags map[uint32]bool) {
 		path = strings.ToLower(filepath.Clean(path))
 
 		if !tags[pid] && strings.HasPrefix(path, prefix) {
-			fmt.Printf("Process %s => %d \n", path, pid)
-			KillPid(pid)
+			targets = append(targets, targetProcess{pid, path})
 		}
 	}
+	// Stop the GUI first, otherwise killing its core causes automatic respawn
+	// after the process snapshot and leaves a new executable locking the update.
+	sort.SliceStable(targets, func(i, j int) bool {
+		return filepath.Base(targets[i].path) == "nekobox.exe" && filepath.Base(targets[j].path) != "nekobox.exe"
+	})
+	for _, target := range targets {
+		pid := target.pid
+		fmt.Printf("Process %s => %d \n", target.path, pid)
+		if err := KillPid(pid); err != nil {
+			// A process can disappear between enumeration and opening it.
+			if _, checkErr := getProcessPath(pid); checkErr == nil {
+				return fmt.Errorf("stop process %d: %w", pid, err)
+			}
+		}
+	}
+	return nil
 }
 
 var (
@@ -657,20 +700,34 @@ func getDownloadDir() string {
 func DownloadWithProgress(url, outPath string) error {
 
 	fmt.Printf("\nDownload from url %s to file %s\n", url, outPath)
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)
+	}
 
-	out, err := os.Create(outPath)
+	out, err := os.CreateTemp(filepath.Dir(outPath), ".vcredist-*.part")
 	if err != nil {
 		return err
 	}
 	defer out.Close()
+	defer os.Remove(out.Name())
 
 	_, err = io.Copy(out, resp.Body)
 	if err != nil {
+		return err
+	}
+	if err = out.Sync(); err != nil {
+		return err
+	}
+	if err = out.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(out.Name(), outPath); err != nil {
 		return err
 	}
 
@@ -688,11 +745,12 @@ func wsainit() {
 	}
 }
 
-func InstallVcRedist() {
+func InstallVcRedist() error {
 	var download string = getDownloadDir()
 	var VCRedistDownload string = ""
 	var VCRedistFile string = ""
 	if download == "" {
+		return fmt.Errorf("downloads directory unavailable for Visual C++ runtime")
 	} else {
 		if runtime.GOARCH == "amd64" {
 			VCRedistDownload = "https://aka.ms/vc14/vc_redist.x64.exe"
@@ -708,13 +766,20 @@ func InstallVcRedist() {
 		if !fileExists(VCRedistFile) {
 			var err error = DownloadWithProgress(VCRedistDownload, VCRedistFile)
 			if err != nil {
-				fmt.Printf("Download failed: %s", err.Error())
-				os.Exit(1)
+				return fmt.Errorf("Visual C++ runtime download failed: %w", err)
 			}
 		}
-		cmd := exec.Command(VCRedistFile)
-		cmd.Run()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, VCRedistFile, "/install", "/quiet", "/norestart")
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		if err := cmd.Run(); err != nil {
+			if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 3010 {
+				return fmt.Errorf("Visual C++ runtime installation: %w", err)
+			}
+		}
 	}
+	return nil
 }
 
 func mustAtoi(s string) uint32 {
@@ -756,11 +821,17 @@ func InstallerMode() {
 	//	tagmap[ppid] = true
 
 	if *install_vcpkg {
-		InstallVcRedist()
+		if err := InstallVcRedist(); err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
 	}
 
 	if *kill_processes != "" {
-		KillProcesses(*kill_processes, tagmap)
+		if err := KillProcesses(*kill_processes, tagmap); err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
 	}
 
 	os.Exit(0)

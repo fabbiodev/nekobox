@@ -21,6 +21,7 @@
 #include <nekobox/stats/autotester/ProxyAutoTester.hpp>
 #include <3rdparty/qv2ray/v2/ui/widgets/speedchart/SpeedWidget.hpp>
 #include <nekobox/ui/setting/QuickRoutesWidget.h>
+#include <nekobox/ui/utils/ProfileOperationQueue.h>
 
 
 #ifdef Q_OS_UNIX
@@ -165,7 +166,7 @@ public:
 
     void add_from_deeplink(const QString&);
 
-    void call_updater();
+    bool call_updater();
 
     void prepare_exit();
 
@@ -358,8 +359,7 @@ private slots:
 private:
     void set_searchBox();
 
-    QFuture<bool> elevated_future;
-    QMutex elevated_mutex;
+    bool requesting_privileges = false;
  //   QDateTime lastElevated = lastUpdated, lastStarted = lastUpdated;
     bool get_elevated_permissions_future(int reason = 3, void *pointer = nullptr);
 
@@ -373,7 +373,11 @@ private:
     //
     QThreadPool *parallelCoreCallPool = new QThreadPool(this);
     std::atomic<bool> stopSpeedtest = false;
-    QMutex speedtestRunning;
+    QSemaphore speedtestRunning{1};
+    std::atomic<int> live_test_profile_id{-1};
+    std::atomic<uint64_t> profile_generation{0};
+    std::atomic<uint64_t> live_test_profile_generation{0};
+    qint64 last_speedtest_ui_update_ms = 0;
     QMutex logLock;
     bool logClear = false;
     bool force_hide_text_under_buttons = false;
@@ -407,10 +411,10 @@ private:
     int proxy_last_order = -1;
   //  bool select_mode = false;
     bool keep_running = false;
-    QMutex mu_starting;
-    QMutex mu_stopping;
-    QMutex mu_exit;
+    ProfileOperationQueue profile_operations;
+    void process_profile_operations();
     int exit_reason = 0;
+    bool exit_in_progress = false;
     //
     QMutex mu_download_update;
     QMutex mu_check_update;
@@ -520,7 +524,7 @@ private:
 //    void message_queue(MessageQueue & queue);
     void setupConnectionList();
 
-    void querySpeedtest(QDateTime lastProxyListUpdate, const QMap<QString, int>& tag2entID, bool testCurrent);
+    void querySpeedtest(const QMap<QString, int>& tag2entID, bool testCurrent);
 
     void queryCountryTest(const QMap<QString, int>& tag2entID, bool testCurrent);
 

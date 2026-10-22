@@ -2,33 +2,30 @@ package boxbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"time"
 )
 
-func (s *Box) CloseWithTimeout(cancal context.CancelFunc, d time.Duration, logFunc func(v ...any)) {
-	start := time.Now()
-	t := time.NewTimer(d)
-	done := make(chan struct{})
-
-	printCloseTime := func() {
-		logFunc("[Info] sing-box closed in", fmt.Sprintf("%d ms", time.Since(start).Milliseconds()))
-	}
-
-	go func(cancel context.CancelFunc, closer io.Closer) {
-		cancel()
-		closer.Close()
-		close(done)
-		if !t.Stop() {
-			printCloseTime()
+func (s *Box) BeginClose(cancel context.CancelFunc, logFunc func(v ...any)) <-chan struct{} {
+	return s.closeTask.Begin(func() error {
+		start := time.Now()
+		if cancel != nil {
+			cancel()
 		}
-	}(cancal, s)
+		err := s.Close()
+		logFunc("[Info] sing-box closed in", fmt.Sprintf("%d ms", time.Since(start).Milliseconds()))
+		return err
+	})
+}
 
-	select {
-	case <-t.C:
-		logFunc("[Warning] sing-box close takes longer than expected.")
-	case <-done:
-		printCloseTime()
+func (s *Box) CloseWithTimeout(cancel context.CancelFunc, d time.Duration, logFunc func(v ...any)) error {
+	s.BeginClose(cancel, logFunc)
+	ctx, stop := context.WithTimeout(context.Background(), d)
+	defer stop()
+	err := s.closeTask.Wait(ctx, s.Close)
+	if errors.Is(err, context.DeadlineExceeded) {
+		logFunc("[Warning] sing-box is still closing; its TUN resources are not released yet.")
 	}
+	return err
 }

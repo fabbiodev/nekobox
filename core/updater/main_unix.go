@@ -5,16 +5,16 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"time"
 )
 
 func run() error {
 	flag.Bool("verbose", false, "verbose mode")
 	digest := flag.String("sha256", "", "expected package SHA-256")
+	waitPID := flag.Int("waitpid", 0, "wait for old application to exit")
+	readyFile := flag.String("ready-file", "", "acknowledge readiness before GUI exits")
 	flag.Parse()
 	args := flag.Args()
 	pkg, install, err := validateArguments(args, false)
@@ -24,7 +24,18 @@ func run() error {
 	if err := verifyPackage(pkg, *digest); err != nil {
 		return err
 	}
-	time.Sleep(2 * time.Second)
+	if err = acknowledgeReady(*readyFile); err != nil {
+		return err
+	}
+	if *readyFile != "" {
+		defer os.Remove(*readyFile)
+	}
+	if err = waitForParent(*waitPID, parentExitTimeout); err != nil {
+		return err
+	}
+	if err = checkHandoffCancelled(*readyFile); err != nil {
+		return err
+	}
 	if err := Updater(pkg, install); err != nil {
 		return err
 	}
@@ -45,8 +56,6 @@ func run() error {
 }
 
 func main() {
-	if err := run(); err != nil {
-		log.Print(err)
-		os.Exit(1)
-	}
+	updaterMain(run)
+	os.Exit(updaterExitCode)
 }

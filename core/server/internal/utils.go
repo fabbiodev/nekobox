@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"net"
@@ -30,7 +31,29 @@ const (
 
 var ruleset_cachedir string
 
-var BoxInstance *boxbox.Box
+var instanceMu sync.RWMutex
+var boxInstance *boxbox.Box
+var instanceCancel context.CancelFunc
+
+func CurrentInstance() (*boxbox.Box, context.CancelFunc) {
+	instanceMu.RLock()
+	defer instanceMu.RUnlock()
+	return boxInstance, instanceCancel
+}
+func CurrentBox() *boxbox.Box { instance, _ := CurrentInstance(); return instance }
+func SetInstance(instance *boxbox.Box, cancel context.CancelFunc) {
+	instanceMu.Lock()
+	defer instanceMu.Unlock()
+	boxInstance, instanceCancel = instance, cancel
+}
+func ClearInstance(instance *boxbox.Box) {
+	instanceMu.Lock()
+	defer instanceMu.Unlock()
+	if boxInstance == instance {
+		boxInstance, instanceCancel = nil, nil
+	}
+}
+
 var ExtraProcess *process.Process
 var NeedUnsetDNS bool
 
@@ -38,37 +61,60 @@ var SystemProxyController settings.SystemProxy
 var SystemProxyAddr string
 var SystemProxyPort uint16
 var SystemProxySupportSOCKS bool
+var systemProxyMu sync.Mutex
 
-var InstanceCancel context.CancelFunc
 var Debug bool
 
 func IsSystemProxyEnabled() bool {
+	systemProxyMu.Lock()
+	defer systemProxyMu.Unlock()
+	return isSystemProxyEnabled()
+}
+
+func isSystemProxyEnabled() bool {
 	return SystemProxyController != nil && SystemProxyController.IsEnabled()
 }
 
 func ResetSystemProxy() error {
-	if IsSystemProxyEnabled() {
+	systemProxyMu.Lock()
+	defer systemProxyMu.Unlock()
+	return resetSystemProxy()
+}
+
+func resetSystemProxy() error {
+	if isSystemProxyEnabled() {
 		return SystemProxyController.Disable()
 	}
 	return nil
 }
 
 func SetSystemProxy(ctx context.Context, serverAddr string, serverPort uint16, supportSOCKS bool) error {
-	if BoxInstance == nil {
+	systemProxyMu.Lock()
+	defer systemProxyMu.Unlock()
+	if CurrentBox() == nil {
 		return nil
 	}
 	if serverAddr == SystemProxyAddr && serverPort == SystemProxyPort && supportSOCKS == SystemProxySupportSOCKS {
-		if IsSystemProxyEnabled() {
+		if isSystemProxyEnabled() {
 			return nil
 		}
 	} else {
-		ResetSystemProxy()
+		if err := resetSystemProxy(); err != nil {
+			return err
+		}
+	}
+	addr := metadata.ParseSocksaddrHostPort(serverAddr, serverPort)
+	controller, err := settings.NewSystemProxy(ctx, addr, supportSOCKS)
+	if err != nil {
+		return err
+	}
+	if controller == nil {
+		return fmt.Errorf("system proxy controller is unavailable")
 	}
 	SystemProxyAddr = serverAddr
 	SystemProxyPort = serverPort
 	SystemProxySupportSOCKS = supportSOCKS
-	addr := metadata.ParseSocksaddrHostPort(serverAddr, serverPort)
-	SystemProxyController, _ = settings.NewSystemProxy(ctx, addr, supportSOCKS)
+	SystemProxyController = controller
 	return SystemProxyController.Enable()
 }
 
@@ -79,10 +125,11 @@ func SetRulesetCachedir(v string) bool {
 
 func BoxCreateHttpClient(instance *boxbox.Box) *http.Client {
 	if instance == nil {
-		return &http.Client{}
+		return &http.Client{Timeout: 15 * time.Second}
 	}
-	outbound := BoxInstance.Outbound().Default()
+	outbound := instance.Outbound().Default()
 	client := &http.Client{
+		Timeout: 15 * time.Second,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
 				return outbound.DialContext(ctx, "tcp", metadata.ParseSocksaddr(addr))
@@ -95,29 +142,35 @@ func BoxCreateHttpClient(instance *boxbox.Box) *http.Client {
 func DownloadFile(originalURL, targetPath string, use_default_outbound bool) error {
 	// Create all necessary directories for the target path
 	dir := filepath.Dir(targetPath)
-	err := os.MkdirAll(dir, 0755)
-	// Open the file for writing
-	outFile, err := os.Create(targetPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create cache directory: %w", err)
+	}
+	// Never leave a truncated cache entry after a failed download.
+	outFile, err := os.CreateTemp(dir, ".download-*")
 	if err != nil {
 		return fmt.Errorf("failed to create file: %v", err)
 	}
-	defer outFile.Close()
+	defer func() {
+		outFile.Close()
+		os.Remove(outFile.Name())
+	}()
 	// Download the file
 	var client *http.Client
 
 	if use_default_outbound {
 		goto def_cli
 	} else {
-		if BoxInstance == nil {
+		instance := CurrentBox()
+		if instance == nil {
 			goto def_cli
 		} else {
-			client = BoxCreateHttpClient(BoxInstance)
+			client = BoxCreateHttpClient(instance)
 			goto skip_def_cli
 		}
 	}
 def_cli:
 
-	client = &http.Client{}
+	client = &http.Client{Timeout: 15 * time.Second}
 skip_def_cli:
 
 	parsedURL, err := url.Parse(originalURL)
@@ -153,12 +206,21 @@ skip_def_cli:
 		return fmt.Errorf("failed to download file: %v", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)
+	}
 	// Copy the downloaded content to the file
 	_, err = io.Copy(outFile, resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to save file: %v", err)
 	}
-	return nil
+	if err := outFile.Sync(); err != nil {
+		return err
+	}
+	if err := outFile.Close(); err != nil {
+		return err
+	}
+	return os.Rename(outFile.Name(), targetPath)
 }
 
 func urlToPath(url string) string {
@@ -184,7 +246,9 @@ func fileExists(path string) bool {
 
 func CacheHttpBool(url string, use_default_outbound bool, s *bool) string {
 	if url == "" {
-		*s = false
+		if s != nil {
+			*s = false
+		}
 		return ""
 	}
 	path := urlToPath(url)
@@ -197,7 +261,12 @@ func CacheHttpBool(url string, use_default_outbound bool, s *bool) string {
 		}())
 		err := DownloadFile(url, path, use_default_outbound)
 		if err != nil {
-			log.Fatalf("Error while downloading: %s", err.Error())
+			log.Printf("Error while downloading ruleset: %s", err.Error())
+			if s != nil {
+				*s = false
+			}
+			// The missing file is reported by configuration validation, not os.Exit.
+			return path
 		}
 		if s != nil {
 			*s = true

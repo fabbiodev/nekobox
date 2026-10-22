@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
+	"nekobox_core/internal/lifecycle"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -40,6 +41,7 @@ var _ adapter.SimpleLifecycle = (*Box)(nil)
 
 type Box struct {
 	ctx             context.Context
+	cancel          context.CancelFunc
 	createdAt       time.Time
 	logFactory      log.Factory
 	logger          log.ContextLogger
@@ -54,6 +56,9 @@ type Box struct {
 	router          *route.Router
 	internalService []adapter.LifecycleService
 	done            chan struct{}
+	closeOnce       sync.Once
+	closeErr        error
+	closeTask       lifecycle.CloseTask
 
 	StartCtx context.Context
 }
@@ -131,6 +136,13 @@ func New(options Options) (*Box, error) {
 	if serviceRegistry == nil {
 		return nil, E.New("missing service registry in context")
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	created := false
+	defer func() {
+		if !created {
+			cancel()
+		}
+	}()
 
 	ctx = pause.WithDefaultManager(ctx)
 	experimentalOptions := common.PtrValueOrDefault(options.Experimental)
@@ -391,8 +403,10 @@ func New(options Options) (*Box, error) {
 		timeService.TimeService = ntpService
 		internalServices = append(internalServices, adapter.NewLifecycleService(ntpService, "ntp service"))
 	}
+	created = true
 	return &Box{
 		ctx:             ctx,
+		cancel:          cancel,
 		network:         networkManager,
 		endpoint:        endpointManager,
 		inbound:         inboundManager,
@@ -504,15 +518,38 @@ func (s *Box) start() error {
 }
 
 func (s *Box) Close() error {
-	select {
-	case <-s.done:
-		return os.ErrClosed
-	default:
-		close(s.done)
+	s.closeOnce.Do(func() { s.closeErr = s.close() })
+	return s.closeErr
+}
+
+func (s *Box) close() error {
+	close(s.done)
+	// Also cancel when Close is called after a partial/failed Start, rather
+	// than relying on the caller to cancel only after cleanup has returned.
+	if s.cancel != nil {
+		s.cancel()
 	}
-	err := common.Close(
-		s.service, s.endpoint, s.inbound, s.outbound, s.router, s.connection, s.dnsRouter, s.dnsTransport, s.network,
-	)
+	// Abort tracked application sockets before tearing down AWG/netstack and
+	// the TUN stack. Otherwise stack teardown can wait for live connections.
+	var err error
+	stages := []struct {
+		name   string
+		closer io.Closer
+	}{
+		{"connections", s.connection},
+		{"services", s.service}, {"endpoints", s.endpoint}, {"inbounds", s.inbound},
+		{"outbounds", s.outbound}, {"router", s.router}, {"dns-router", s.dnsRouter},
+		{"dns-transports", s.dnsTransport}, {"network", s.network},
+	}
+	for _, stage := range stages {
+		s.logger.Debug("closing ", stage.name)
+		start := time.Now()
+		stageErr := common.Close(stage.closer)
+		err = E.Append(err, stageErr, func(e error) error { return E.Cause(e, "close ", stage.name) })
+		if elapsed := time.Since(start); elapsed > time.Second {
+			s.logger.Warn("close ", stage.name, " took ", elapsed)
+		}
+	}
 	for _, lifecycleService := range s.internalService {
 		err = E.Append(err, lifecycleService.Close(), func(err error) error {
 			return E.Cause(err, "close ", lifecycleService.Name())

@@ -225,6 +225,10 @@ file(GLOB_RECURSE UPDATER_GO_SOURCES CONFIGURE_DEPENDS "${GO_SOURCE_DIR}/updater
 # Updater build (optional)
 # ----------------------------
 if(NOT SKIP_UPDATER)
+    set(UPDATER_LDFLAGS "-w -s")
+    if(GOOS STREQUAL "windows")
+        string(APPEND UPDATER_LDFLAGS " -H=windowsgui")
+    endif()
     run_go_command("${GO_SOURCE_DIR}/updater" ${GO_TIDY_CMD})
     run_go_command("${GO_SOURCE_DIR}/updater" ${GO_VENDOR_CMD})
 
@@ -233,7 +237,7 @@ if(NOT SKIP_UPDATER)
         DEPENDS ${UPDATER_GO_SOURCES} "${GO_SOURCE_DIR}/updater/go.mod"
         COMMAND ${CMAKE_COMMAND} -E env ${GO_ENV}
 				${CMAKE_COMMAND} -E chdir "${GO_SOURCE_DIR}/updater"
-                "${GOCMD}" build ${GO_MOD_FLAG} -buildmode=pie -buildvcs=false -o "${DESTDIR}/updater${EXE_SUFFIX}" -trimpath -ldflags "-w -s"
+                "${GOCMD}" build ${GO_MOD_FLAG} -buildmode=pie -buildvcs=false -o "${DESTDIR}/updater${EXE_SUFFIX}" -trimpath -ldflags "${UPDATER_LDFLAGS}"
     )
     add_custom_target(updater_target ALL DEPENDS "${DESTDIR}/updater${EXE_SUFFIX}")
 

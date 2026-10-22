@@ -23,6 +23,10 @@
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QThread>
+#include <QFutureWatcher>
+#include <QScopeGuard>
+#include <QTimer>
+#include <exception>
 
 
 #ifndef NKR_SOFTWARE_KEYS
@@ -93,15 +97,16 @@ void MainWindow::runURLTest(const QString& config, bool useDefault, const QStrin
     req.max_concurrency = (Configs::dataStore->test_concurrent);
     req.test_timeout_ms = (Configs::dataStore->url_test_timeout_ms);
 
-    auto done = new QMutex;
-    done->lock();
+    const auto done = std::make_shared<std::atomic<bool>>(false);
+    const auto pollingDone = std::make_shared<QSemaphore>();
     runOnNewThread([=,this]
     {
+        const auto complete = qScopeGuard([pollingDone] { pollingDone->release(); });
         bool ok;
         while (true)
         {
             QThread::msleep(200);
-            if (done->try_lock()) break;
+            if (done->load()) break;
             auto resp = defaultClient->QueryURLTest(&ok);
             if (!ok || resp->results.empty() )
             {
@@ -145,12 +150,11 @@ void MainWindow::runURLTest(const QString& config, bool useDefault, const QStrin
                 });
             }
         }
-        done->unlock();
-        delete done;
     });
     bool rpcOK;
     auto result = defaultClient->Test(&rpcOK, req);
-    done->unlock();
+    done->store(true);
+    pollingDone->acquire();
     //
     if (!rpcOK || result->results.empty()) return;
 
@@ -198,122 +202,79 @@ bool MainWindow::testProfileLatency(
     return false;
 }
 
-bool MainWindow::urltest_current_group(const QList<int>& profiles,
+bool MainWindow::urltest_current_group(const QList<int>& ids,
         bool skip_last_url_test_warning, const std::function<void(const QList<int>&)> &finish) {
-    if (profiles.isEmpty()) {
-        return false;
-    }
-    if (!speedtestRunning.tryLock()) {
-        if (!skip_last_url_test_warning){
-            runOnUiThread([this](){
+    if (ids.isEmpty()) return false;
+    if (!speedtestRunning.tryAcquire()) {
+        if (!skip_last_url_test_warning)
+            runOnUiThread([this] {
                 QMessageBox::warning(this, software_name, tr("The last url test did not exit completely, please wait. If it persists, please restart the program."));
             });
-        }
         return false;
     }
-
-    runOnNewThread([this, profiles_ids = profiles, finish]() {
-        QList<std::shared_ptr<Configs::ProxyEntity>> profiles;
-
-        auto lambda = [this, finish](QList<std::shared_ptr<Configs::ProxyEntity>> &profiles)->void{
-            auto buildObject = Configs::BuildTestConfig(profiles);
-            if (!buildObject->error.isEmpty()) {
-                MW_show_log(tr("Failed to build test config: ") + buildObject->error);
-                speedtestRunning.unlock();
-                if (finish != nullptr)
-                    finish({});
-                return;
+    stopSpeedtest.store(false);
+    runOnNewThread([this, ids, finish] {
+        const auto release = qScopeGuard([this] { speedtestRunning.release(); });
+        bool failed = false;
+        for (int offset = 0; offset < ids.size() && !stopSpeedtest.load(); offset += 25) {
+            QList<std::shared_ptr<Configs::ProxyEntity>> profiles;
+            for (int i = offset; i < qMin(offset + 25, int(ids.size())); ++i) {
+                if (auto profile = Configs::profileManager->GetProfile(ids[i])) profiles.append(profile);
             }
-
-        std::atomic<int> counter(0);
-        stopSpeedtest.store(false);
-        auto testCount = (!buildObject->fullConfigs.isEmpty()) +
-            (!buildObject->outboundTags.isEmpty());
-        if (!buildObject->fullConfigs.isEmpty()) {
-            auto fullConfigs = buildObject->fullConfigs;
-            auto func = [this, &counter, testCount, fullConfigs]() {
-                for (auto it = fullConfigs.constBegin(); it != fullConfigs.constEnd(); ++it) {
-                    if (stopSpeedtest.load()) {
-                        break;
+            if (profiles.isEmpty()) continue;
+            const auto config = Configs::BuildTestConfig(profiles);
+            if (!config->error.isEmpty()) {
+                MW_show_log(tr("Failed to build test config: ") + config->error);
+                failed = true;
+                break;
+            }
+            // Separate per-batch completion from the global test gate. The old
+            // gate was unlocked from other threads and could deadlock after 25.
+            const auto done = std::make_shared<QSemaphore>();
+            int jobs = 0;
+            if (!config->fullConfigs.isEmpty()) {
+                ++jobs;
+                parallelCoreCallPool->start([this, config, done] {
+                    const auto complete = qScopeGuard([done] { done->release(); });
+                    for (auto it = config->fullConfigs.cbegin(); it != config->fullConfigs.cend(); ++it) {
+                        if (stopSpeedtest.load()) break;
+                        runURLTest(it.value(), true, {}, {}, it.key());
                     }
-                    MainWindow::runURLTest(it.value(), true, {}, {}, it.key());
-                }
-                counter++;
-                if (counter.load() == testCount) {
-                    speedtestRunning.unlock();
-                }
-            };
-            parallelCoreCallPool->start(func);
+                });
+            }
+            if (!config->outboundTags.isEmpty()) {
+                ++jobs;
+                parallelCoreCallPool->start([this, config, done] {
+                    const auto complete = qScopeGuard([done] { done->release(); });
+                    if (!stopSpeedtest.load())
+                        runURLTest(QJsonObject2QString(config->coreConfig, false), false,
+                                   config->outboundTags, config->tag2entID);
+                });
+            }
+            done->acquire(jobs); // Worker only; no GUI wait, no stack captures.
         }
-
-        if (!buildObject->outboundTags.isEmpty()) {
-            auto func = [this, &buildObject, &counter, testCount]() {
-                MainWindow::runURLTest(QJsonObject2QString(buildObject->coreConfig, false), 
-                    false, buildObject->outboundTags, buildObject->tag2entID);
-                counter++;
-                if (counter.load() == testCount) {
-                    speedtestRunning.unlock();
-                }
-            };
-            parallelCoreCallPool->start(func);
-        }
-        if (testCount == 0) speedtestRunning.unlock();
-
-        speedtestRunning.lock();
-        speedtestRunning.unlock();
-
-        runOnUiThread([=,this]{
+        runOnUiThread([this] {
             refresh_proxy_list();
             MW_show_log(tr("URL test finished!"));
         });
-        };
-
-        int count = profiles_ids.count();
-        int index = 0;
-        int batch = 0;
-        stopSpeedtest.store(false);
-        while (index < count){
-            auto profile = Configs::profileManager->GetProfile(profiles_ids.at(index));
-            index ++;
-            if (profile != nullptr){
-             profiles << profile;
-            } else {
-                continue;
-            }
-            batch ++;
-            if (batch == 25){
-                if (!stopSpeedtest.load()){
-                    lambda(profiles);
-                } else {
-                    break;
-                }
-                speedtestRunning.lock();
-                profiles.clear();
-                batch = 0;
-            }
-        }
-        if (!stopSpeedtest.load()){
-            lambda(profiles);
-            profiles.clear();
-        }
-        if (finish != nullptr){
-            finish(profiles_ids);
-        }
+        if (finish) finish(failed ? QList<int>{} : ids);
     });
     return true;
 }
 
 void MainWindow::stopTests() {
     stopSpeedtest.store(true);
-    bool ok;
-    defaultClient->StopTests(&ok);
-
-    if (!ok) {
-        MW_show_log(tr("Failed to stop tests"));
-    }
+    runOnNewThread([] {
+        bool ok = false;
+        API::defaultClient->StopTests(&ok);
+        if (!ok) MW_show_log(MainWindow::tr("Failed to stop tests"));
+    });
 }
 
 void MainWindow::url_test_current() {
+    const auto testedProfile = running;
+    if (!testedProfile) return;
+    const auto generation = profile_generation.load();
     last_test_time = QDateTime::currentSecsSinceEpoch();
     ui->label_running->setText(tr("Testing"));
 
@@ -336,9 +297,9 @@ void MainWindow::url_test_current() {
 
         auto results_0 = result->results.at(0);
         auto latency = results_0.latency_ms;
-        last_test_time = QDateTime::currentSecsSinceEpoch();
-
         runOnUiThread([=,this] {
+            if (running != testedProfile || profile_generation.load() != generation) return;
+            last_test_time = QDateTime::currentSecsSinceEpoch();
             if (!results_0.error.empty()) {
                 MW_show_log(QString("UrlTest error: %1").arg(
                     QString::fromUtf8(results_0.error.c_str())));
@@ -366,14 +327,19 @@ void MainWindow::speedtest_current_group(const QList<int>& profiles_ids,
     if (profiles_ids.isEmpty() && !testCurrent) {
         return;
     }
-    if (!speedtestRunning.tryLock()) {
+    if (!speedtestRunning.tryAcquire()) {
         runOnUiThread([this](){
             QMessageBox::warning(this, software_name, tr("The last speed test did not exit completely, please wait. If it persists, please restart the program."));
         });
         return;
     }
 
-    runOnNewThread([testCurrent, this, testmode, profiles_ids]() {
+    live_test_profile_id = testCurrent && running ? running->id : -1;
+    live_test_profile_generation = profile_generation.load();
+    QStringList liveTags;
+    if (testCurrent && running && !running->IsFullConfig()) liveTags << "proxy";
+    runOnNewThread([testCurrent, this, testmode, profiles_ids, liveTags]() {
+        const auto release = qScopeGuard([this] { speedtestRunning.release(); });
         if (!testCurrent)
         {
         QList<std::shared_ptr<Configs::ProxyEntity>> profiles;
@@ -420,7 +386,6 @@ void MainWindow::speedtest_current_group(const QList<int>& profiles_ids,
         skip_loopback:
         if (!stopSpeedtest.load()){
             if ((index < count)){
-                speedtestRunning.lock();
                 goto loop_back;
             }
         }
@@ -429,16 +394,10 @@ void MainWindow::speedtest_current_group(const QList<int>& profiles_ids,
         {
             stopSpeedtest.store(false);
             // untagged the core would measure route.final, not the profile
-            QStringList tags;
-            if (running != nullptr) {
-                auto profile = Configs::profileManager->GetProfile(running->id);
-                if (profile != nullptr && !profile->IsFullConfig()) tags << "proxy";
-            }
-            runSpeedTest("", true, true, tags, {}, -1,
+            runSpeedTest("", true, true, liveTags, {}, -1,
                 testmode);
         }
 
-        speedtestRunning.unlock();
         runOnUiThread([=,this]{
             refresh_proxy_list();
             MW_show_log(tr("Speedtest finished!"));
@@ -446,30 +405,30 @@ void MainWindow::speedtest_current_group(const QList<int>& profiles_ids,
     });
 }
 
-void MainWindow::querySpeedtest(QDateTime lastProxyListUpdate, const QMap<QString, int>& tag2entID, bool testCurrent)
+void MainWindow::querySpeedtest(const QMap<QString, int>& tag2entID, bool testCurrent)
 {
+    const int testId = live_test_profile_id.load();
+    const auto generation = live_test_profile_generation.load();
+    if (testCurrent && testId < 0) return;
     bool ok;
     auto res = defaultClient->QueryCurrentSpeedTests(&ok);
     if (!ok || !res->is_running)
     {
         return;
     }
-    auto profile = testCurrent ? running : 
-        Configs::profileManager->GetProfile(
+    runOnUiThread([=, this]
+    {
+        if (testCurrent && (profile_generation.load() != generation || live_test_profile_id.load() != testId || !running || running->id != testId)) return;
+        const auto profile = Configs::profileManager->GetProfile(testCurrent ? testId :
             tag2entID[QString::fromUtf8(res->result.outbound_tag.c_str())]);
-    if (profile == nullptr)
-    {
-        return;
-    }
-    runOnUiThread([=, this, &lastProxyListUpdate]
-    {
+        if (!profile) return;
         showSpeedtestData = true;
         currentSptProfileName = profile->name;
         auto result = currentTestResult = res->result;
         UpdateDataView();
 
         if (result.error.empty() && !result.cancelled && 
-            lastProxyListUpdate.msecsTo(QDateTime::currentDateTime()) >= 500)
+            QDateTime::currentMSecsSinceEpoch() - last_speedtest_ui_update_ms >= 500)
         {
             auto dl_speed = QString::fromUtf8(result.dl_speed.c_str());
             auto ul_speed = QString::fromUtf8(result.ul_speed.c_str());
@@ -481,13 +440,16 @@ void MainWindow::querySpeedtest(QDateTime lastProxyListUpdate, const QMap<QStrin
             if (!country.isEmpty()) profile->test_country = CountryNameToCode((country));
             profile->Save();
             refresh_proxy_list(profile->id);
-            lastProxyListUpdate = QDateTime::currentDateTime();
+            last_speedtest_ui_update_ms = QDateTime::currentMSecsSinceEpoch();
         }
     });
 }
 
 void MainWindow::queryCountryTest(const QMap<QString, int>& tag2entID, bool testCurrent)
 {
+    const int testId = live_test_profile_id.load();
+    const auto generation = live_test_profile_generation.load();
+    if (testCurrent && testId < 0) return;
     bool ok;
     auto res = defaultClient->QueryCountryTestResults(&ok);
     if (!ok || res->results.empty())
@@ -496,15 +458,12 @@ void MainWindow::queryCountryTest(const QMap<QString, int>& tag2entID, bool test
     }
     for (const auto& result : res->results)
     {
-        auto profile = testCurrent ? running : 
-        Configs::profileManager->GetProfile(tag2entID[
-            (QString::fromUtf8(result.outbound_tag.c_str()))]);
-        if (profile == nullptr)
-        {
-            return;
-        }
         runOnUiThread([=, this]
         {
+            if (testCurrent && (profile_generation.load() != generation || live_test_profile_id.load() != testId || !running || running->id != testId)) return;
+            const auto profile = Configs::profileManager->GetProfile(testCurrent ? testId :
+                tag2entID[QString::fromUtf8(result.outbound_tag.c_str())]);
+            if (!profile) return;
             if (result.error.empty() && !result.cancelled)
             {
                 auto latency = result.latency;
@@ -547,14 +506,14 @@ void MainWindow::runSpeedTest(const QString& config, bool useDefault, bool testC
     req.country_concurrency = ( Configs::dataStore->test_concurrent);
 
     // loop query result
-    auto doneMu = new QMutex;
-    doneMu->lock();
+    const auto doneMu = std::make_shared<std::atomic<bool>>(false);
+    const auto pollingDone = std::make_shared<QSemaphore>();
     runOnNewThread([=,this]
     {
-        QDateTime lastProxyListUpdate = QDateTime::currentDateTime();
+        const auto complete = qScopeGuard([pollingDone] { pollingDone->release(); });
         while (true) {
             QThread::msleep(100);
-            if (doneMu->tryLock())
+            if (doneMu->load())
             {
                 break;
             }
@@ -563,7 +522,7 @@ void MainWindow::runSpeedTest(const QString& config, bool useDefault, bool testC
                 queryCountryTest(tag2entID, testCurrent);
             } else
             {
-                querySpeedtest(lastProxyListUpdate, tag2entID, testCurrent);
+                querySpeedtest(tag2entID, testCurrent);
             }
         }
         runOnUiThread([=, this]
@@ -571,17 +530,16 @@ void MainWindow::runSpeedTest(const QString& config, bool useDefault, bool testC
             showSpeedtestData = false;
             UpdateDataView(true);
         });
-        doneMu->unlock();
-        delete doneMu;
     });
     bool rpcOK;
     auto result = defaultClient->SpeedTest(&rpcOK, req);
-    doneMu->unlock();
+    doneMu->store(true);
+    pollingDone->acquire();
     //
     if (!rpcOK || result->results.empty() ) return;
 
     for (const auto &res: result->results) {
-        if (testCurrent) entID = running ? running->id : -1;
+        if (testCurrent) entID = live_test_profile_id.load();
         else {
             auto tag = QString::fromUtf8(res.outbound_tag.c_str());
             entID = tag2entID.count(tag) == 0 ? -1 : tag2entID[tag];
@@ -642,155 +600,210 @@ bool MainWindow::set_system_dns(bool set, bool save_set) {
     return true;
 }
 
-void MainWindow::profile_start(int _id, bool do_not_test) {
-    
+void MainWindow::profile_start(int id, bool do_not_test) {
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, [this, id, do_not_test] {
+            profile_start(id, do_not_test);
+        }, Qt::QueuedConnection);
+        return;
+    }
     if (Configs::dataStore->prepare_exit) return;
 #ifdef Q_OS_UNIX
-    if (Configs::dataStore->enable_dns_server && Configs::dataStore->dns_server_listen_port <= 1024) {
-        if (!get_elevated_permissions()) {
-            MW_show_log(QString("Failed to get admin access, cannot listen on port %1 without it").arg(Configs::dataStore->dns_server_listen_port));
-            return;
-        }
+    if (Configs::dataStore->enable_dns_server && Configs::dataStore->dns_server_listen_port <= 1024 &&
+        !get_elevated_permissions()) {
+        MW_show_log(QString("Failed to get admin access, cannot listen on port %1 without it")
+                        .arg(Configs::dataStore->dns_server_listen_port));
+        return;
     }
 #endif
-     
-    auto ents = get_now_selected_list();
-    auto ent = Configs::profileManager->GetProfile((_id < 0 && !ents.isEmpty()) ? ents.first() : (_id));
-    if (ent == nullptr) return;
-/*
-    if (select_mode) {
-        emit profile_selected(ent->id);
-        select_mode = false;
-        runOnUiThread([this](){
-            refresh_status();
+    const auto selected = get_now_selected_list();
+    if (id < 0 && !selected.isEmpty()) id = selected.first();
+    const auto ent = Configs::profileManager->GetProfile(id);
+    if (!ent) return;
+    const auto group = Configs::profileManager->GetGroup(ent->gid);
+    if (!group || group->archive) return;
+
+    profile_operations.enqueue({id, do_not_test, false, false, {}});
+    process_profile_operations();
+}
+
+namespace {
+struct ProfileStopResult {
+    bool ok = false;
+    QString error;
+    QList<int> savedIds;
+};
+struct ProfileStartResult {
+    bool ok = false;
+    QString error;
+};
+
+void showProfileError(QWidget *parent, const QString &title, const QString &error,
+                      std::function<void()> reset = {}) {
+    // Do not hold the operation queue inside a modal exec() event loop.
+    auto message = new QMessageBox(QMessageBox::Warning, title, error, QMessageBox::Ok, parent);
+    message->setAttribute(Qt::WA_DeleteOnClose);
+    if (reset) {
+        const auto button = message->addButton(MainWindow::tr("Reset"), QMessageBox::ActionRole);
+        QObject::connect(button, &QPushButton::clicked, message, [message, reset] {
+            message->close();
+            reset();
         });
-        return;
     }
-*/
-    auto group = Configs::profileManager->GetGroup(ent->gid);
-    if (group == nullptr || group->archive) return;
+    message->open();
+}
+}
 
-    auto profile_start_stage2 = [=, this] {
-        //
-        bool rpcOK;
-        auto [error, result] = defaultClient->StartEntity(&rpcOK, ent);
-        if (!rpcOK) {
-            return false;
-        }
-
-        if (!error.isEmpty()) {
-            if (error.contains("configure tun interface")) {
-                runOnUiThread([=, this] {
-
-                    QMessageBox msg(
-                        QMessageBox::Information,
-                        tr("Tun device misbehaving"),
-                        tr("If you have trouble starting VPN, you can force reset Core process here and then try starting the profile again. The error is %1").arg(error),
-                        QMessageBox::NoButton,
-                        this
-                    );
-                    msg.addButton(tr("Reset"), QMessageBox::ActionRole);
-                    auto cancel = msg.addButton(tr("Cancel"), QMessageBox::ActionRole);
-
-                    msg.setDefaultButton(cancel);
-                    msg.setEscapeButton(cancel);
-
-                    int r = msg.exec() - 2;
-                    if (r == 0) {
-                        GetMainWindow()->StopVPNProcess();
-                    }
-                });
-                return false;
-            }
-            runOnUiThread([error,this] { 
-               QMessageBox::warning(this, "LoadConfig return error", error); 
-            });
-            return false;
-        }
-        //
-        Stats::trafficLooper->items = result->outboundStats;
-        Stats::trafficLooper->isChain = ent->type == "chain";
-        Stats::trafficLooper->loop_enabled = true;
-        Stats::connection_lister->suspend = false;
-        Configs::dataStore->UpdateStartedId(ent->id);
-        running = ent;
-
-        runOnUiThread([=, this] {
-            refresh_status();
-            refresh_proxy_list(ent->id);
-        });
-
-        return true;
+void MainWindow::process_profile_operations() {
+    const auto next = profile_operations.next();
+    if (!next) return;
+    const auto operation = *next;
+    const auto finish = [this, operation] {
+        profile_operations.finish();
+        if (operation.completed) operation.completed();
+        QTimer::singleShot(0, this, &MainWindow::process_profile_operations);
     };
 
-    if (!mu_starting.tryLock()) {
-        runOnUiThread([this](){
-            QMessageBox::warning(this, software_name, tr("Another profile is starting..."));
-        });
-        return;
-    }
-    if (!mu_stopping.tryLock()) {
-        
-        runOnUiThread([this](){
-            QMessageBox::warning(this, software_name, tr("Another profile is stopping..."));
-        });
-        mu_starting.unlock();
-        return;
-    }
-    mu_stopping.unlock();
+    const auto start = [this, operation, finish] {
+        if (operation.id < 0 || Configs::dataStore->prepare_exit) {
+            finish();
+            return;
+        }
+        const auto ent = Configs::profileManager->GetProfile(operation.id);
+        const auto group = ent ? Configs::profileManager->GetGroup(ent->gid) : nullptr;
+        if (!ent || !group || group->archive) {
+            finish();
+            return;
+        }
+        if (!Configs::dataStore->core_running) {
+            runOnThread([this, id = ent->id] {
+                core_process->start_profile_when_core_is_up = id;
+            }, DS_cores);
+            finish();
+            return;
+        }
 
-    // check core state
-    if (!Configs::dataStore->core_running) {
-        runOnThread(
-            [=, this] {
-//                MW_show_log(tr("Try to start the config, but the core has not listened to the RPC port, so restart it..."));
-                core_process->start_profile_when_core_is_up = ent->id;
- //               core_process->Restart();
-            },
-            DS_cores);
-        mu_starting.unlock();
-        return; // let CoreProcess call profile_start when core is up
-    }
-
-    // timeout message
-    auto restartMsgbox = new QMessageBox(QMessageBox::Question, software_name, tr("If there is no response for a long time, it is recommended to restart the software."), QMessageBox::Yes | QMessageBox::No, this);
-    connect(restartMsgbox, &QMessageBox::accepted, this, [=,this] { MW_dialog_message("", "RestartProgram"); });
-    auto restartMsgboxTimer = new MessageBoxTimer(this, restartMsgbox, 10000);
-    QMutex * mutex = new QMutex();
-    mutex->lock();
-    runOnUiThread([this, mutex](){
-        profile_stop(false, true, true);
-        mutex->unlock();
-    });
-    runOnNewThread([=, this] {
-        mutex->lock();
-        mutex->unlock();
-        delete mutex;
-        // do start
         MW_show_log(">>>>>>>> " + tr("Starting profile %1").arg(ent->DisplayTypeAndName()));
-        runOnUiThread([this] {
-            this->ui->start_stop_button->setState(Icon::State::CONNECTING);
-        });
-        if (!profile_start_stage2()) {
-            MW_show_log("<<<<<<<< " + tr("Failed to start profile %1").arg(ent->DisplayTypeAndName()));
-            runOnUiThread([this] {
-                this->ui->start_stop_button->setState(Icon::State::IDLE);
+        ui->start_stop_button->setState(Icon::State::CONNECTING);
+        auto watcher = new QFutureWatcher<ProfileStartResult>(this);
+        connect(watcher, &QFutureWatcher<ProfileStartResult>::finished, this,
+                [this, watcher, ent, operation, finish] {
+            const auto result = watcher->result();
+            watcher->deleteLater();
+            if (result.ok) {
+                ++profile_generation;
+                running = ent;
+                Configs::dataStore->UpdateStartedId(ent->id);
+                Stats::trafficLooper->setEnabled(true);
+                Stats::connection_lister->setSuspended(false);
+            } else {
+                MW_show_log("<<<<<<<< " + tr("Failed to start profile %1").arg(ent->DisplayTypeAndName()));
+                if (!result.error.isEmpty() && !Configs::dataStore->prepare_exit)
+                    showProfileError(this, tr("LoadConfig return error"), result.error,
+                        result.error.contains("configure tun interface") ?
+                            std::function<void()>([this] { StopVPNProcess(); }) : std::function<void()>{});
+            }
+            ui->start_stop_button->setState(result.ok ? Icon::State::RUNNING : Icon::State::IDLE);
+            refresh_status();
+            refresh_proxy_list(ent->id);
+            // Do not launch a latency test for an instance already queued to stop.
+            const bool test = result.ok && !operation.doNotTest && !profile_operations.hasPending() &&
+                              !Configs::dataStore->prepare_exit;
+            finish();
+            if (test) QTimer::singleShot(0, this, [this] {
+                if (running && !profile_operations.hasPending()) url_test_current();
             });
-        }
-        mu_starting.unlock();
-        if (!do_not_test) {
-            // test via the live instance: a second one steals the wg/awg session
-            runOnUiThread([this] {
-                if (running != nullptr) url_test_current();
-            });
-        }
-        // cancel timeout
-        runOnUiThread([=,this] {
-            restartMsgboxTimer->cancel();
-            restartMsgboxTimer->deleteLater();
-            restartMsgbox->deleteLater();
         });
+        watcher->setFuture(QtConcurrent::run([ent] {
+            ProfileStartResult out;
+            try {
+                bool rpcOK = false;
+                auto [error, config] = API::defaultClient->StartEntity(&rpcOK, ent);
+                out.error = error;
+                out.ok = rpcOK && error.isEmpty() && config != nullptr;
+                if (out.ok) {
+                    QMutexLocker lock(&Stats::trafficLooper->loop_mutex);
+                    Stats::trafficLooper->items = config->outboundStats;
+                    Stats::trafficLooper->isChain = ent->type == "chain";
+                }
+            } catch (const std::exception &e) {
+                out.error = QString::fromUtf8(e.what());
+            } catch (...) {
+                out.error = QStringLiteral("Unexpected error while starting the profile");
+            }
+            return out;
+        }));
+    };
+
+    if (!running) {
+        start();
+        return;
+    }
+    const auto oldProfile = running;
+    const auto id = oldProfile->id;
+    ++profile_generation;
+    live_test_profile_id = -1;
+    Stats::trafficLooper->setEnabled(false);
+    Stats::connection_lister->setSuspended(true);
+    UpdateConnectionListWithRecreate({});
+    ui->start_stop_button->setState(Icon::State::DISCONNECTING);
+    MW_show_log(">>>>>>>> " + tr("Stopping profile %1").arg(oldProfile->DisplayTypeAndName()));
+
+    auto watcher = new QFutureWatcher<ProfileStopResult>(this);
+    connect(watcher, &QFutureWatcher<ProfileStopResult>::finished, this,
+            [this, watcher, operation, id, start, finish] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        for (const int savedId : result.savedIds) refresh_proxy_list(savedId);
+        if (!result.ok) {
+            // Keep ownership in the GUI too. An RPC timeout is NOT a successful
+            // stop, and launching another TUN now can deadlock both instances.
+            MW_show_log("<<<<<<<< " + tr("Failed to stop, please restart the program."));
+            ui->start_stop_button->setState(Icon::State::RUNNING);
+            if (!result.error.isEmpty() && !Configs::dataStore->prepare_exit)
+                showProfileError(this, tr("Stop return error"), result.error,
+                                 [this] { StopVPNProcess(); });
+            finish();
+            return;
+        }
+        running = nullptr;
+        ui->start_stop_button->setState(Icon::State::IDLE);
+        if (operation.manual) Configs::dataStore->UpdateStartedId(-1919);
+        Configs::dataStore->need_keep_vpn_off = false;
+        refresh_status();
+        refresh_proxy_list_impl_refresh_data(id, true);
+        start();
     });
+    watcher->setFuture(QtConcurrent::run([operation] {
+        ProfileStopResult out;
+        try {
+            // Both the lock and the last RPC flush belong on a worker. Waiting
+            // on this mutex in the GUI used to freeze every settings restart.
+            {
+                QMutexLocker lock(&Stats::trafficLooper->loop_mutex);
+                if (!operation.crash) Stats::trafficLooper->UpdateAll();
+                for (const auto &item : Stats::trafficLooper->items) {
+                    if (item->id < 0) continue;
+                    const auto profile = Configs::profileManager->GetProfile(item->id);
+                    if (!profile) continue;
+                    profile->Save();
+                    out.savedIds.append(item->id);
+                }
+            }
+            if (operation.crash) {
+                out.ok = true;
+            } else {
+                bool rpcOK = false;
+                out.error = API::defaultClient->Stop(&rpcOK);
+                out.ok = rpcOK && out.error.isEmpty();
+            }
+        } catch (const std::exception &e) {
+            out.error = QString::fromUtf8(e.what());
+        } catch (...) {
+            out.error = QStringLiteral("Unexpected error while stopping the profile");
+        }
+        return out;
+    }));
 }
 
 bool MainWindow::set_spmode_system_proxy(bool enable, bool save) {
@@ -844,96 +857,25 @@ bool MainWindow::set_spmode_system_proxy(bool enable, bool save) {
 }
 
 void MainWindow::profile_stop(bool crash, bool block, bool manual) {
-    if (running == nullptr) {
+    if (QThread::currentThread() != thread()) {
+        // Core callbacks and shutdown can originate on worker threads. Widgets,
+        // running and the operation queue must only be touched by the GUI.
+        const auto done = std::make_shared<QSemaphore>();
+        QMetaObject::invokeMethod(this, [this, crash, manual, done] {
+            profile_operations.enqueue({-1, true, crash, manual, [done] { done->release(); }});
+            process_profile_operations();
+        }, Qt::QueuedConnection);
+        if (block) done->acquire();
         return;
     }
-    auto id = running->id;
 
-    auto profile_stop_stage2 = [=,this] {
-        if (!crash) {
-            bool rpcOK;
-            QString error = defaultClient->Stop(&rpcOK);
-            if (rpcOK && !error.isEmpty()) {
-                runOnUiThread([=,this] { 
-                    QMessageBox::warning(this, tr("Stop return error"), error); 
-                });
-                return false;
-            } else if (!rpcOK) {
-                return false;
-            }
-        }
-        return true;
-    };
-
-    if (!mu_stopping.tryLock()) {
-        return;
-    }
-    // Handing a QMutex from the thread that locked it to another thread to
-    // unlock is an error in Qt and could leave the caller waiting forever,
-    // a semaphore is the primitive meant to be released across threads.
-    QSemaphore blocker;
-
-    // timeout message
-    auto restartMsgbox = new QMessageBox(QMessageBox::Question, software_name, tr("If there is no response for a long time, it is recommended to restart the software."),
-                                         QMessageBox::Yes | QMessageBox::No, this);
-    connect(restartMsgbox, &QMessageBox::accepted, this, [=,this] { MW_dialog_message("", "RestartProgram"); });
-    auto restartMsgboxTimer = new MessageBoxTimer(this, restartMsgbox, 5000);
-
-    Stats::trafficLooper->loop_enabled = false;
-    Stats::connection_lister->suspend = true;
-    UpdateConnectionListWithRecreate({});
-    Stats::trafficLooper->loop_mutex.lock();
-    Stats::trafficLooper->UpdateAll();
-    for (const auto &item: Stats::trafficLooper->items) {
-        if (item->id < 0) continue;
-        auto profile = Configs::profileManager->GetProfile(item->id);
-        if (profile == nullptr) continue;
-        profile->Save();
-        refresh_proxy_list(item->id);
-    }
-    Stats::trafficLooper->loop_mutex.unlock();
-
-    restartMsgboxTimer->cancel();
-    restartMsgboxTimer->deleteLater();
-    restartMsgbox->deleteLater();
-
-    const auto stoppingName = running->DisplayTypeAndName();
-    ui->start_stop_button->setState(Icon::State::DISCONNECTING);
-
-    runOnNewThread([=, this, &blocker] {
-        // do stop
-        MW_show_log(">>>>>>>> " + tr("Stopping profile %1").arg(stoppingName));
-        if (!profile_stop_stage2()) {
-            MW_show_log("<<<<<<<< " + tr("Failed to stop, please restart the program."));
-            runOnUiThread([this] {
-                ui->start_stop_button->setState(Icon::State::RUNNING);
-            });
-        }
-
-        if (manual) Configs::dataStore->UpdateStartedId(-1919);
-        Configs::dataStore->need_keep_vpn_off = false;
-        running = nullptr;
-
-        if (block) blocker.release();
-
-        runOnUiThread([=, this] {
-            refresh_status();
-            refresh_proxy_list_impl_refresh_data(id, true);
-
-            mu_stopping.unlock();
-        });
-    });
-
-    if (block)
-    {
-        // Stop() talks to the core and can take seconds. Blocking the GUI
-        // thread here is what Windows reports as "Not Responding".
-        if (QThread::currentThread() == QCoreApplication::instance()->thread()) {
-            while (!blocker.tryAcquire(1, 50)) {
-                QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 50);
-            }
-        } else {
-            blocker.acquire();
-        }
+    const auto done = std::make_shared<QSemaphore>();
+    profile_operations.enqueue({-1, true, crash, manual, [done] { done->release(); }});
+    process_profile_operations();
+    if (block) {
+        // Only legacy shutdown/suspend callers need a synchronous completion.
+        // Normal switching never nests an event loop or waits on a GUI mutex.
+        while (!done->tryAcquire(1, 20))
+            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
     }
 }

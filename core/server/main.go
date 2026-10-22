@@ -3,7 +3,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -39,11 +38,12 @@ func RunCore(addr net.Addr, _debug *bool) {
 		_, loaded := <-osSignals
 		if loaded {
 			internal.ResetSystemProxy()
-			if internal.BoxInstance != nil {
-				internal.InstanceCancel()
-				boxmain.CloseMonitor(internal.BoxInstance.StartCtx)
+			if instance, cancel := internal.CurrentInstance(); instance != nil {
+				if err := instance.CloseWithTimeout(cancel, 6*time.Second, log.Println); err != nil {
+					log.Println("Core shutdown:", err)
+				}
 			}
-			//		closeMonitor(startCtx)
+			os.Exit(0)
 		}
 	}()
 
@@ -259,7 +259,7 @@ func main() {
 	fmt.Println("sing-box:", C.Version)
 	fmt.Println()
 
-	testCtx, cancelTests = context.WithCancel(context.Background())
+	resetTestContext()
 	var addr net.Addr
 	var err error
 	socket := *_sock

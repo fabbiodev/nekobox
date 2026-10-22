@@ -6,6 +6,7 @@
 
 #include <QList>
 #include <QMutex>
+#include <atomic>
 #include <QString>
 #include <nekobox/dataStore/ConfigItem.hpp>
 #include <nekobox/dataStore/TrafficData.hpp>
@@ -22,7 +23,9 @@ public:
   ADD_MAP("direct", direct, jsonStore);
   STOP_MAP
 
-  bool loop_enabled = false;
+  std::atomic<bool> loop_enabled = false;
+  std::atomic<uint64_t> generation{0};
+  void setEnabled(bool enabled) { loop_enabled.store(enabled); ++generation; }
   bool looping = false;
   QMutex loop_mutex;
 

@@ -96,6 +96,7 @@
 #include <QTextBlock>
 #include <QThread>
 #include <QTimer>
+#include <QUuid>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
 #include <QStyleHints>
 #endif
@@ -305,10 +306,10 @@ void MainWindow::menu_server_about_to_show(QMenu *menu_server) {
   ui->menu_update_profile->setEnabled(selected_profile);
   ui->menu_reset_traffic->setEnabled(selected_profile);
 
-  if (!speedtestRunning.tryLock()) {
+  if (!speedtestRunning.tryAcquire()) {
     menu_server->addAction(ui->menu_stop_testing);
   } else {
-    speedtestRunning.unlock();
+    speedtestRunning.release();
     menu_server->removeAction(ui->menu_stop_testing);
   }
 
@@ -717,27 +718,22 @@ MainWindow::MainWindow(QWidget *parent)
         Configs::profileManager->FillProfileEnts(out_all, out_all_ids);
       }
       QList<std::shared_ptr<Configs::ProxyEntity>> out_del;
-      QThreadPool *parallelCoreCallPool = new QThreadPool(this);
-
-      std::atomic counter(0);
-      QMutex mu;
+      QThreadPool validationPool;
+      QSemaphore done;
       QMutex access;
       int profileSize = out_all.size();
-      mu.lock();
       for (const auto &profile : out_all) {
-        parallelCoreCallPool->start(
-            [&out_del, profile, &counter, &mu, profileSize, &access] {
+        validationPool.start(
+            [&out_del, profile, &done, &access] {
+              const auto complete = qScopeGuard([&done] { done.release(); });
               if (!Configs::IsValid(profile)) {
                 access.lock();
                 out_del += profile;
                 access.unlock();
               }
-              if (++counter == profileSize)
-                mu.unlock();
             });
       }
-      mu.lock();
-      mu.unlock();
+      done.acquire(profileSize); // Zero profiles must not wait forever.
 
       change_text += QObject::tr("\nDeleted %1 Invalid").arg(out_del.length());
       if (!out_del.empty()) {
@@ -1680,7 +1676,6 @@ skip_updater_hide:
           CHECK_SETTINGS_ACCESS_W
           runOnNewThread([this] {
             if (mu_download_update.try_lock()) {
-              QMutex mut;
               showRuleSetData = true;
               for (auto &item : ruleSetMap.values()) {
                 if (!showRuleSetData) {
@@ -1689,15 +1684,11 @@ skip_updater_hide:
                 QString url(Configs::get_jsdelivr_link(item.toString()));
                 //        QFile cache_file(str);
                 //      if (!cache_file.exists()) {
-                mut.lock();
-                runOnUiThread([this, &url, &mut]() {
+                runOnUiThread([this, url]() {
                   this->setDownloadReport(DownloadProgressReport{url, 0, 0},
                                           true);
                   UpdateDataView(true);
-                  mut.unlock();
                 });
-                mut.lock();
-                mut.unlock();
                 this->fetch_ruleset_cache(url);
                 //           NetworkRequestHelper::DownloadAsset(
                 //               Configs::get_jsdelivr_link(url), str);
@@ -2452,15 +2443,17 @@ void MainWindow::on_commitDataRequest() {
 }
 
 void MainWindow::prepare_exit() {
+  if (QThread::currentThread() != thread()) {
+    QMetaObject::invokeMethod(this, [this] { prepare_exit(); }, Qt::BlockingQueuedConnection);
+    return;
+  }
 #ifdef DEBUG_MODE
   qDebug() << "prepare for exit...";
 #endif
-  mu_exit.lock();
   if (Configs::dataStore->prepare_exit) {
 #ifdef DEBUG_MODE
     qDebug() << "prepare exit had already succeeded, ignoring...";
 #endif
-    mu_exit.unlock();
     return;
   }
   this->hide();
@@ -2482,7 +2475,6 @@ void MainWindow::prepare_exit() {
 #ifdef DEBUG_MODE
     QThread::sleep(2);
 #endif
-  mu_exit.unlock();
 #ifdef DEBUG_MODE
   qDebug() << "prepare exit done!";
 #endif
@@ -2496,62 +2488,82 @@ void MainWindow::point_changed(int width, int height) {
   runOnUiThread([=, this] { this->move(width, height); });
 }
 
-void MainWindow::call_updater() {
+bool MainWindow::call_updater() {
 #ifndef SKIP_UPDATE_BUTTON
-  QStringList list;
-  QString updateDir;
-#ifdef Q_OS_UNIX
-  if (isAppImage()) {
-    updateDir = softwareFilePath;
-  } else {
-#endif
-    updateDir = softwarePath;
-#ifdef Q_OS_UNIX
+  if (QThread::currentThread() != thread()) {
+    bool started = false;
+    QMetaObject::invokeMethod(this, [this, &started] { started = call_updater(); },
+                              Qt::BlockingQueuedConnection);
+    return started;
   }
+  QString updateDir = softwarePath;
+#ifdef Q_OS_UNIX
+  if (isAppImage()) updateDir = softwareFilePath;
 #endif
-  list << this->updater_args;
-  list << "--";
-  list << this->archive_name;
-  list << updateDir;
+  const auto fail = [this](const QString &error) {
+    MW_show_log("[Updater] " + error);
+    QMessageBox::warning(this, tr("Updater"), error);
+    return false;
+  };
+  const QString tempPath = QDir(Configs::GetBasePath()).absoluteFilePath("temp");
+  if (!QDir().mkpath(tempPath)) return fail(tr("Cannot create updater temporary directory: %1").arg(tempPath));
+  const auto token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+  QString destination = QDir(tempPath).filePath("updater-" + token);
+#ifdef Q_OS_WIN
+  destination += ".exe";
+#endif
+  if (!QFile::copy(updaterPath, destination))
+    return fail(tr("Cannot prepare updater: %1").arg(updaterPath));
+  const QString readyPath = destination + ".ready";
+  QStringList list = updater_args;
+  list << "--waitpid" << QString::number(QCoreApplication::applicationPid());
+  list << "--ready-file" << readyPath << "--" << archive_name << updateDir;
   auto arguments = Configs::dataStore->argv;
-  if (arguments.length() > 0) {
-    arguments.removeFirst();
-    arguments.removeAll("-tray");
-    arguments.removeAll("-flag_restart_tun_on");
-    arguments.removeAll("-flag_restart_dns_set");
-  }
+  if (!arguments.isEmpty()) arguments.removeFirst();
+  arguments.removeAll("-tray");
+  arguments.removeAll("-flag_restart_tun_on");
+  arguments.removeAll("-flag_restart_dns_set");
   list += arguments;
-  QString sourceFilePath = updaterPath;
-  QDir tempdir;
-  tempdir.mkpath("temp");
-  QString destinationFilePath = Configs::GetBasePath();
+  bool launched;
 #ifdef Q_OS_WIN
-  destinationFilePath += "\\temp\\updater-" + QString::number(QCoreApplication::applicationPid()) + ".exe";
+  // The NSIS installer requests administrator privileges even for a portable
+  // installation in a user-writable directory. Check UAC before closing GUI.
+  launched = WinCommander::runProcess(destination, list, tempPath, SW_HIDE, false, true) != uint(-1);
 #else
-  destinationFilePath += "/temp/updater-" + QString::number(QCoreApplication::applicationPid());
+  launched = QProcess::startDetached(destination, list, tempPath);
 #endif
-  if (QFile::copy(sourceFilePath, destinationFilePath)) {
-#ifdef DEBUG_MODE
-    qDebug() << "File copied successfully from" << sourceFilePath << "to"
-             << destinationFilePath;
-#endif
-#ifdef Q_OS_WIN
-    WinCommander::runProcess(destinationFilePath, list, "", SW_NORMAL, false,
-                             (!isDirectoryWritable(updateDir)));
-#else
-    QProcess::startDetached(destinationFilePath, list);
-#endif
-  } else {
-#ifdef DEBUG_MODE
-    qDebug() << "Failed to copy file from" << sourceFilePath << "to"
-             << destinationFilePath;
-#endif
+  if (!launched) {
+    QFile::remove(destination);
+    return fail(tr("Cannot launch updater. The application will stay open."));
   }
+  QEventLoop loop;
+  QTimer poll, timeout;
+  timeout.setSingleShot(true);
+  connect(&poll, &QTimer::timeout, &loop, [&] { if (QFileInfo::exists(readyPath)) loop.quit(); });
+  connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+  poll.start(25);
+  timeout.start(15000);
+  loop.exec(QEventLoop::ExcludeUserInputEvents);
+  if (!QFileInfo::exists(readyPath)) {
+    QFile cancellation(readyPath + ".cancel");
+    if (cancellation.open(QIODevice::WriteOnly)) cancellation.close();
+    return fail(tr("Updater did not confirm readiness. The application will stay open. See NekoBox/logs/updater.log in your user cache directory."));
+  }
+  MW_show_log("[Updater] Package verified; closing the application for installation.");
+  return true;
+#else
+  return false;
 #endif
 }
 
 void MainWindow::on_menu_exit_triggered(bool faster){
+  if (QThread::currentThread() != thread()) {
+    QMetaObject::invokeMethod(this, [this, faster] { on_menu_exit_triggered(faster); }, Qt::QueuedConnection);
+    return;
+  }
+  if (exit_in_progress) return;
   CHECK_ACTION_ACCESS_R
+  exit_in_progress = true;
 
   auto overlay = std::make_shared<ShutdownOverlay>(nullptr, true); 
   overlay->start();
@@ -2569,6 +2581,7 @@ void MainWindow::on_menu_exit_triggered(bool faster){
     overlay->finish();
   });
   overlay->exec();
+  if (!quit) exit_in_progress = false;
   if (quit){
     QApplication::quit();
   }
@@ -2578,10 +2591,11 @@ bool MainWindow::on_menu_exit_triggered_func() {
   int exit_reason = this->exit_reason;
   this->exit_reason = 0;
 
+  if (exit_reason == 1 && !call_updater()) return false;
   prepare_exit();
   //
   if (exit_reason == 1) {
-    call_updater();
+    // Already launched and acknowledged; it is waiting for this GUI to exit.
   } else if (exit_reason == 2 || exit_reason == 3 || exit_reason == 4) {
     QDir::setCurrent(softwarePath);
 
@@ -2626,28 +2640,19 @@ void MainWindow::toggle_system_proxy() {
 }
 
 bool MainWindow::get_elevated_permissions(int reason, void *pointer) {
-  elevated_mutex.lock();
-  if (elevated_future.isRunning()) {
-    elevated_mutex.unlock();
-    elevated_future.waitForFinished();
-    return elevated_future.result();
+  if (QThread::currentThread() != thread()) {
+    bool result = false;
+    QMetaObject::invokeMethod(this, [this, reason, pointer, &result] {
+      result = get_elevated_permissions(reason, pointer);
+    }, Qt::BlockingQueuedConnection);
+    return result;
   }
-  QMutex mut;
-  bool *ret = new bool(false);
-  mut.lock();
-  elevated_future =
-      QtConcurrent::run([this, &mut, ret]() {
-        mut.lock();
-        mut.unlock();
-        bool rr = *ret;
-        delete ret;
-        return rr;
-      });
-  elevated_mutex.unlock();
-  *ret = get_elevated_permissions_future(reason, pointer);
-  mut.unlock();
-  elevated_future.waitForFinished();
-  return elevated_future.result();
+  // A permission dialog pumps GUI events. Waiting on its unfinished future
+  // from a second GUI callback deadlocked the first permission request.
+  if (requesting_privileges) return false;
+  requesting_privileges = true;
+  const auto complete = qScopeGuard([this] { requesting_privileges = false; });
+  return get_elevated_permissions_future(reason, pointer);
 }
 
 bool MainWindow::get_elevated_permissions_future(int reason, void *pointer) {
@@ -4058,9 +4063,10 @@ QPixmap grabScreen(QScreen *screen, bool &ok) {
         QMap<QString, QVariant>({{"handle_token", QVariant(token)},
                                  {"interactive", QVariant(false)}}));
 
+    QTimer::singleShot(15000, &loop, &QEventLoop::quit);
     loop.exec();
     QObject::disconnect(conn);
-    request->Close().waitForFinished();
+    request->Close();
     request->deleteLater();
 
     if (p.isNull()) {
@@ -4089,8 +4095,7 @@ void MainWindow::parseQrImage(const QPixmap *image) {
 
 void MainWindow::on_menu_scan_qr_triggered() {
   hide();
-  QThread::sleep(1);
-
+  QTimer::singleShot(1000, this, [this] {
   bool ok = true;
   QPixmap qpx(grabScreen(QGuiApplication::primaryScreen(), ok));
 
@@ -4101,6 +4106,7 @@ void MainWindow::on_menu_scan_qr_triggered() {
     QMessageBox::information(this, software_name,
                              tr("Unable to capture screen"));
   }
+  });
 }
 
 void MainWindow::on_menu_clear_test_result_triggered(bool isSelected) {
@@ -4267,28 +4273,24 @@ void MainWindow::on_menu_remove_invalid_triggered() {
         Configs::profileManager->GetGroup(Configs::dataStore->current_group);
     if (currentGroup == nullptr)
       return;
-    std::atomic counter(0);
-    QMutex mu;
+    QSemaphore done;
     QMutex access;
-    mu.lock();
     int nulls1 = currentGroup->DropNulls();
     auto ents = currentGroup->profiles;
     int profileSize = ents.size();
     for (const auto &profileid : ents) {
       auto profile = Configs::profileManager->GetProfile(profileid);
       parallelCoreCallPool->start(
-          [&out_del, profile, profileid, &counter, &mu, profileSize, &access] {
-            if (!IsValid(profile)) {
+          [&out_del, profile, profileid, &done, &access] {
+            const auto complete = qScopeGuard([&done] { done.release(); });
+            if (!profile || !IsValid(profile)) {
               access.lock();
               out_del += profileid;
               access.unlock();
             }
-            if (++counter == profileSize)
-              mu.unlock();
           });
     }
-    mu.lock();
-    mu.unlock();
+    done.acquire(profileSize);
 
     int remove_display_count = 0;
     QString remove_display;
@@ -4866,10 +4868,10 @@ void MainWindow::on_tabWidget_customContextMenuRequested(const QPoint &p) {
     }
     if (group->is_subscription)
       menu->addAction(ui->menu_update_subscription);
-    if (!speedtestRunning.tryLock()) {
+    if (!speedtestRunning.tryAcquire()) {
       menu->addAction(ui->menu_stop_testing);
     } else {
-      speedtestRunning.unlock();
+      speedtestRunning.release();
       menu->removeAction(ui->menu_stop_testing);
     }
     if (menu != ui->menuCurrent_group) {
@@ -5174,16 +5176,23 @@ void MainWindow::HotkeyEvent(const QString &key) {
 }
 
 bool MainWindow::StopVPNProcess() {
-  QMutex waitStop;
-  waitStop.lock();
+  if (QThread::currentThread() == core_process->thread()) {
+    core_process->Kill();
+    return true;
+  }
+  const auto done = std::make_shared<QSemaphore>();
   runOnThread(
-      [=, this, &waitStop] {
+      [this, done] {
         core_process->Kill();
-        waitStop.unlock();
+        done->release();
       },
       DS_cores);
-  waitStop.lock();
-  waitStop.unlock();
+  if (QThread::currentThread() == thread()) {
+    while (!done->tryAcquire(1, 20))
+      QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
+  } else {
+    done->acquire();
+  }
   return true;
 }
 
@@ -5291,24 +5300,21 @@ void MainWindow::CheckUpdate(bool button_clicked) {
   if (!mu_check_update.tryLock()) return;
   const auto unlockUpdate = qScopeGuard([this] { mu_check_update.unlock(); });
 #ifdef NKR_SOFTWARE_KEYS
-  QMutex mut;
-  mut.lock();
-  auto b = new bool[1];
-  *b = false;
-  runOnUiThread([b, &mut]() {
+  bool denied = false;
+  QSemaphore checked;
+  const auto checkAccess = [&] {
     if (!confirmLock(LockValue::LockSettings)) {
       QWidget *wd = new QDialog();
       set_access_denied(wd);
-      *b = true;
+      denied = true;
       wd->show();
     }
-    mut.unlock();
-  });
-  mut.lock();
-  mut.unlock();
-  if (*b) {
-    return;
-  }
+    checked.release();
+  };
+  if (QThread::currentThread() == thread()) checkAccess();
+  else runOnUiThread(checkAccess);
+  checked.acquire();
+  if (denied) return;
 #endif
 
   bool is_newer = false;

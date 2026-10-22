@@ -1,4 +1,5 @@
 //go:build !darwin
+
 package main
 
 import (
@@ -22,8 +23,21 @@ import (
 	"github.com/sagernet/sing/service"
 )
 
-var testCtx context.Context
-var cancelTests context.CancelFunc
+var testCtx, cancelTests = context.WithCancel(context.Background())
+var testContextMu sync.Mutex
+
+func currentTestContext() context.Context {
+	testContextMu.Lock()
+	defer testContextMu.Unlock()
+	return testCtx
+}
+func resetTestContext() {
+	testContextMu.Lock()
+	defer testContextMu.Unlock()
+	cancelTests()
+	testCtx, cancelTests = context.WithCancel(context.Background())
+}
+
 var SpTQuerier SpeedTestResultQuerier
 var URLReporter URLTestReporter
 var CountryResults CountryTestResults
@@ -87,6 +101,8 @@ func (s *SpeedTestResultQuerier) storeResult(result *SpeedTestResult) {
 }
 
 func (s *SpeedTestResultQuerier) setIsRunning(isRunning bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.isRunning = isRunning
 }
 

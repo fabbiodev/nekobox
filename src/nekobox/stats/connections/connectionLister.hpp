@@ -42,7 +42,7 @@ namespace Stats
     public:
         ConnectionLister();
 
-        bool suspend = true;
+        void setSuspended(bool value) { suspend.store(value); ++generation; }
 
         // Rebuilding the table costs more than the data is worth while the user
         // is looking at another tab, so the loop idles until it is shown again.
@@ -60,8 +60,12 @@ namespace Stats
         void update();
 
         QMutex mu;
+        QMutex sort_mu;
+        std::atomic<bool> suspend = true;
+        std::atomic<uint64_t> generation{0};
+        uint64_t lastGeneration = 0;
 
-        bool stop = false;
+        std::atomic<bool> stop = false;
 
         std::shared_ptr<QSet<QString>> state;
 

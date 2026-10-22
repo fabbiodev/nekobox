@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/user"
 	"strconv"
-	"time"
 
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/experimental/deprecated"
@@ -39,7 +38,27 @@ func init() {
 }
 
 func preRun(cmd *cobra.Command, args []string) {
-	globalCtx = context.Background()
+	globalCtx = newServiceContext()
+	if disableColor {
+		DisableColor()
+	}
+	if workingDir != "" {
+		if _, err := os.Stat(workingDir); err != nil {
+			filemanager.MkdirAll(globalCtx, workingDir, 0o777)
+		}
+		if err := os.Chdir(workingDir); err != nil {
+			log.Fatal(err)
+		}
+	}
+	if len(configPaths) == 0 && len(configDirectories) == 0 {
+		configPaths = append(configPaths, "config.json")
+	}
+}
+
+// Each RPC-created instance needs its own registry/context. Concurrent tests
+// must not reset the active profile's global context or change process cwd.
+func newServiceContext() context.Context {
+	ctx := context.Background()
 	sudoUser := os.Getenv("SUDO_USER")
 	sudoUID, _ := strconv.Atoi(os.Getenv("SUDO_UID"))
 	sudoGID, _ := strconv.Atoi(os.Getenv("SUDO_GID"))
@@ -51,24 +70,8 @@ func preRun(cmd *cobra.Command, args []string) {
 		}
 	}
 	if sudoUID > 0 && sudoGID > 0 {
-		globalCtx = filemanager.WithDefault(globalCtx, "", "", sudoUID, sudoGID)
+		ctx = filemanager.WithDefault(ctx, "", "", sudoUID, sudoGID)
 	}
-	if disableColor {
-		log.SetStdLogger(log.NewDefaultFactory(context.Background(), log.Formatter{BaseTime: time.Now(), DisableColors: true}, os.Stderr, "", nil, false).Logger())
-	}
-	if workingDir != "" {
-		_, err := os.Stat(workingDir)
-		if err != nil {
-			filemanager.MkdirAll(globalCtx, workingDir, 0o777)
-		}
-		err = os.Chdir(workingDir)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-	if len(configPaths) == 0 && len(configDirectories) == 0 {
-		configPaths = append(configPaths, "config.json")
-	}
-	globalCtx = service.ContextWith(globalCtx, deprecated.NewStderrManager(log.StdLogger()))
-	globalCtx = box.Context(globalCtx, include.InboundRegistry(), include.OutboundRegistry(), coreinclude.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry())
+	ctx = service.ContextWith(ctx, deprecated.NewStderrManager(log.StdLogger()))
+	return box.Context(ctx, include.InboundRegistry(), include.OutboundRegistry(), coreinclude.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry())
 }

@@ -10,6 +10,9 @@
 #include <QApplication>
 #include <QStandardPaths>
 #include <QCoreApplication>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 #include <nekobox/sys/Settings.h>
 #include <nekobox/ui/mainwindow.h>
 
@@ -58,6 +61,13 @@ namespace Configs_sys {
     }
 
     CoreProcess::CoreProcess(const QString &core_path, const QStringList &args, std::string * domain, int * port, std::function<void()> func) {
+#ifdef Q_OS_WIN
+        process.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *args) {
+            args->flags |= CREATE_NO_WINDOW;
+            args->startupInfo->dwFlags |= STARTF_USESHOWWINDOW;
+            args->startupInfo->wShowWindow = SW_HIDE;
+        });
+#endif
         program = core_path;
         arguments = args;
         this->core_pre_start = func;
@@ -131,7 +141,9 @@ namespace Configs_sys {
                 if (restarting) return;
 
                 MW_show_log("[Fatal] " + QObject::tr("Core exited, cleaning up..."));
-                GetMainWindow()->profile_stop(true, true);
+                // Never block the core event loop waiting for a GUI queue
+                // which can itself be waiting for the core to exit.
+                GetMainWindow()->profile_stop(true, false);
 
                 // Retry rate limit
                 if (coreRestartTimer.isValid()) {

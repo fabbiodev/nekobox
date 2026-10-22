@@ -17,6 +17,7 @@ import (
 	//	"nekobox_core/internal/sys"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/shlex"
@@ -28,6 +29,7 @@ import (
 
 // server is used to implement myservice.MyServiceServer.
 type server struct {
+	profileMu sync.Mutex
 }
 
 // To returns a pointer to the given value.
@@ -66,16 +68,16 @@ func (s *server) CacheHTTP(ctx context.Context, in *gen.CacheURLRequest) (*gen.C
 
 func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (*gen.ErrorResp, error) {
 	out := new(gen.ErrorResp)
+	if !s.profileMu.TryLock() {
+		out.Error = "Another profile operation is in progress"
+		return out, nil
+	}
+	defer s.profileMu.Unlock()
 	var err error
 
 	defer func() {
 		if err != nil {
 			out.Error = (err.Error())
-			internal.BoxInstance = nil
-		} else {
-			context.AfterFunc(internal.BoxInstance.StartCtx, func() {
-				internal.ResetSystemProxy()
-			})
 		}
 	}()
 
@@ -83,8 +85,8 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (*gen.ErrorRe
 		log.Println("Start:", in.CoreConfig)
 	}
 
-	if internal.BoxInstance != nil {
-		err = errors.New("instance already started")
+	if internal.CurrentBox() != nil {
+		err = errors.New("previous profile is running or still closing; stop it before starting another profile")
 		return out, nil
 	}
 
@@ -118,14 +120,21 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (*gen.ErrorRe
 		internal.ExtraProcess = process.NewProcess(in.ExtraProcessPath, args, in.ExtraNoOut)
 		err = internal.ExtraProcess.Start()
 		if err != nil {
+			internal.ExtraProcess = nil
 			return out, nil
 		}
 	}
 
-	internal.BoxInstance, internal.InstanceCancel, err = boxmain.Create([]byte(in.CoreConfig))
+	instance, cancel, createErr := boxmain.Create([]byte(in.CoreConfig))
+	err = createErr
 	if err != nil {
+		if internal.ExtraProcess != nil {
+			internal.ExtraProcess.Stop()
+			internal.ExtraProcess = nil
+		}
 		return out, nil
 	}
+	internal.SetInstance(instance, cancel)
 	//	if strings.Contains(
 	//		in.CoreConfig, "tun-in") && strings.Contains(
 	//		in.CoreConfig, "172.19.0.1/24") {
@@ -171,6 +180,11 @@ func (s *server) DisableSystemProxy(ctx context.Context, in *gen.EmptyReq) (*gen
 
 func (s *server) Stop(ctx context.Context, in *gen.EmptyReq) (*gen.ErrorResp, error) {
 	out := new(gen.ErrorResp)
+	if !s.profileMu.TryLock() {
+		out.Error = "Another profile operation is in progress"
+		return out, nil
+	}
+	defer s.profileMu.Unlock()
 	var err error
 
 	internal.ResetSystemProxy()
@@ -181,7 +195,8 @@ func (s *server) Stop(ctx context.Context, in *gen.EmptyReq) (*gen.ErrorResp, er
 		}
 	}()
 
-	if internal.BoxInstance == nil {
+	instance, cancel := internal.CurrentInstance()
+	if instance == nil {
 		return out, err
 	}
 
@@ -192,9 +207,16 @@ func (s *server) Stop(ctx context.Context, in *gen.EmptyReq) (*gen.ErrorResp, er
 	//			log.Println("Failed to unset system DNS:", err)
 	//		}
 	//	}
-	internal.BoxInstance.CloseWithTimeout(internal.InstanceCancel, time.Second*2, log.Println)
-
-	internal.BoxInstance = nil
+	done := instance.BeginClose(cancel, log.Println)
+	err = instance.CloseWithTimeout(cancel, time.Second*6, log.Println)
+	select {
+	case <-done:
+		internal.ClearInstance(instance)
+	default:
+		// Do not permit another TUN instance while the old one still owns
+		// the adapter. Clear only this generation once it really finishes.
+		go func() { <-done; internal.ClearInstance(instance) }()
+	}
 
 	if internal.ExtraProcess != nil {
 		internal.ExtraProcess.Stop()
@@ -234,6 +256,7 @@ func (s *server) QueryIPTest(ctx context.Context, in *gen.EmptyReq) (out *gen.Qu
 }
 
 func (s *server) IPTest(ctx context.Context, in *gen.IPTestRequest) (*gen.QueryIPTestResponse, error) {
+	testCtx := currentTestContext()
 	out := new(gen.QueryIPTestResponse)
 	var testInstance *boxbox.Box
 	var cancel context.CancelFunc
@@ -292,13 +315,15 @@ func resolveLiveTags(i *boxbox.Box, tags []string) []string {
 }
 
 func (s *server) Test(ctx context.Context, in *gen.TestReq) (*gen.TestResp, error) {
+	testCtx := currentTestContext()
 	out := new(gen.TestResp)
 	var testInstance *boxbox.Box
 	var cancel context.CancelFunc
 	var err error
 	var twice = true
 	if in.TestCurrent {
-		if internal.BoxInstance == nil {
+		testInstance = internal.CurrentBox()
+		if testInstance == nil {
 			out.Results = []*gen.URLTestResp{{
 				OutboundTag: ("proxy"),
 				LatencyMs:   (int32(0)),
@@ -306,14 +331,12 @@ func (s *server) Test(ctx context.Context, in *gen.TestReq) (*gen.TestResp, erro
 			}}
 			return out, nil
 		}
-		testInstance = internal.BoxInstance
 	} else {
 		testInstance, cancel, err = boxmain.Create([]byte(in.Config))
 		if err != nil {
 			return out, err
 		}
-		defer cancel()
-		defer testInstance.Close()
+		defer testInstance.CloseWithTimeout(cancel, 2*time.Second, log.Println)
 	}
 
 	outboundTags := in.OutboundTags
@@ -351,8 +374,7 @@ func (s *server) Test(ctx context.Context, in *gen.TestReq) (*gen.TestResp, erro
 func (s *server) StopTest(ctx context.Context, in *gen.EmptyReq) (*gen.EmptyResp, error) {
 	out := new(gen.EmptyResp)
 
-	cancelTests()
-	testCtx, cancelTests = context.WithCancel(context.Background())
+	resetTestContext()
 
 	return out, nil
 }
@@ -378,20 +400,20 @@ func (s *server) QueryStats(ctx context.Context, in *gen.EmptyReq) (*gen.QuerySt
 	out := new(gen.QueryStatsResp)
 	out.Ups = make(map[string]int64)
 	out.Downs = make(map[string]int64)
-	if internal.BoxInstance != nil {
-		clash := service.FromContext[adapter.ClashServer](internal.BoxInstance.Context())
+	if instance := internal.CurrentBox(); instance != nil {
+		clash := service.FromContext[adapter.ClashServer](instance.Context())
 		if clash != nil {
 			cApi, ok := clash.(*clashapi.Server)
 			if !ok {
 				log.Println("Failed to assert clash server")
 				return out, E.New("invalid clash server type")
 			}
-			outbounds := service.FromContext[adapter.OutboundManager](internal.BoxInstance.Context())
+			outbounds := service.FromContext[adapter.OutboundManager](instance.Context())
 			if outbounds == nil {
 				log.Println("Failed to get outbound manager")
 				return out, E.New("nil outbound manager")
 			}
-			endpoints := service.FromContext[adapter.EndpointManager](internal.BoxInstance.Context())
+			endpoints := service.FromContext[adapter.EndpointManager](instance.Context())
 			if endpoints == nil {
 				log.Println("Failed to get endpoint manager")
 				return out, E.New("nil endpoint manager")
@@ -413,13 +435,14 @@ func (s *server) QueryStats(ctx context.Context, in *gen.EmptyReq) (*gen.QuerySt
 
 func (s *server) ListConnections(ctx context.Context, in *gen.EmptyReq) (*gen.ListConnectionsResp, error) {
 	out := new(gen.ListConnectionsResp)
-	if internal.BoxInstance == nil {
+	instance := internal.CurrentBox()
+	if instance == nil {
 		return out, nil
 	}
-	if service.FromContext[adapter.ClashServer](internal.BoxInstance.Context()) == nil {
+	if service.FromContext[adapter.ClashServer](instance.Context()) == nil {
 		return out, errors.New("no clash server found")
 	}
-	clash, ok := service.FromContext[adapter.ClashServer](internal.BoxInstance.Context()).(*clashapi.Server)
+	clash, ok := service.FromContext[adapter.ClashServer](instance.Context()).(*clashapi.Server)
 	if !ok {
 		return out, errors.New("invalid state, should not be here")
 	}
@@ -451,6 +474,7 @@ func (s *server) ListConnections(ctx context.Context, in *gen.EmptyReq) (*gen.Li
 }
 
 func (s *server) SpeedTest(ctx context.Context, in *gen.SpeedTestRequest) (*gen.SpeedTestResponse, error) {
+	testCtx := currentTestContext()
 	out := new(gen.SpeedTestResponse)
 	if !in.TestDownload && !in.TestUpload && !in.SimpleDownload && !in.OnlyCountry {
 		return out, errors.New("cannot run empty test")
@@ -460,21 +484,20 @@ func (s *server) SpeedTest(ctx context.Context, in *gen.SpeedTestRequest) (*gen.
 	outboundTags := in.OutboundTags
 	var err error
 	if in.TestCurrent {
-		if internal.BoxInstance == nil {
+		testInstance = internal.CurrentBox()
+		if testInstance == nil {
 			out.Results = []*gen.SpeedTestResult_{{
 				OutboundTag: ("proxy"),
 				Error:       ("Instance is not running"),
 			}}
 			return out, nil
 		}
-		testInstance = internal.BoxInstance
 	} else {
 		testInstance, cancel, err = boxmain.Create([]byte(in.Config))
 		if err != nil {
 			return out, err
 		}
-		defer cancel()
-		defer testInstance.Close()
+		defer testInstance.CloseWithTimeout(cancel, 2*time.Second, log.Println)
 	}
 
 	if in.TestCurrent {

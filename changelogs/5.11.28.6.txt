@@ -1,3 +1,11 @@
+- fix: serialize profile switches and wait for the previous AWG/TUN instance to release its connections before starting another profile
+- fix: move blocking core requests off the UI thread and discard stale traffic, connection and speed-test results after a profile switch
+- fix: remove deadlocks in empty profile validation, routing-list updates and repeated connection tests
+- fix: keep NekoBox open if the updater cannot start or verify the package; wait for the old application to exit before installation
+- fix: install updates into paths with spaces, wait for locked processes to exit and preserve existing settings during reinstall
+- fix: stage the Windows payload before replacing files, restore the previous GUI/core pair on installation failure and save installer/updater diagnostics
+- fix: return a configuration error instead of terminating the core when a routing-list download fails; bound downloads and avoid incomplete cache files
+- test: cover rapid profile changes, active-connection shutdown, updater handoff and isolated Windows reinstall failure paths
 - feat: redesign Game Mod with categories, smart search, enabled-services panel, and per-service configurations
 - feat: merge OpenCCK stable and beta website lists at equal routing priority
 - feat: show the active server flag or name and its ping in a compact service status

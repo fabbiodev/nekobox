@@ -1,6 +1,7 @@
 
 
 #include <nekobox/api/RPC.h>
+#include <nekobox/api/ResponsiveTask.hpp>
 #include <nekobox/dataStore/Configs.hpp>
 #include <QDebug>
 #include <optional>
@@ -53,7 +54,7 @@ constexpr int kRpcConnectTimeoutMs = 2000;
 constexpr int kRpcSendTimeoutMs = 5000;
 constexpr int kRpcRecvTimeoutMs = 20000;
 
-static std::shared_ptr<TTransport> getThriftTransport(){
+static std::shared_ptr<TTransport> getThriftTransport(const char *method){
     int port = Configs::dataStore->core_port;
     std::shared_ptr<TSocket> socket;
     if (port > 0){
@@ -63,29 +64,42 @@ static std::shared_ptr<TTransport> getThriftTransport(){
     }
     socket->setConnTimeout(kRpcConnectTimeoutMs);
     socket->setSendTimeout(kRpcSendTimeoutMs);
-    socket->setRecvTimeout(kRpcRecvTimeoutMs);
+    const QByteArray name(method);
+    // A stale statistics poll must not hold the traffic lock for 20 seconds
+    // while a profile switch is waiting to flush its counters.
+    const bool polling = name == "QueryStats" || name == "ListConnections" ||
+                         name == "QueryURLTest" || name == "QueryIPTest" ||
+                         name == "QuerySpeedTest" || name == "QueryCountryTest" || name == "StopTest";
+    socket->setRecvTimeout(polling ? 3000 : (name == "Stop" ? 10000 : kRpcRecvTimeoutMs));
     return socket;
 }
 
-#define CHANNEL(X, VAL)                                                                 \
-std::shared_ptr<TTransport> socketAA(getThriftTransport());                     \
-std::shared_ptr<TTransport> transportAA(new TBufferedTransport(socketAA));                  \
-std::shared_ptr<TProtocol> protocolAA(new TBinaryProtocol(transportAA));                    \
-libcore::LibcoreServiceClient client(protocolAA);                                         \
-Status status;                                                                          \
-std::optional<libcore::VAL> reply = std::nullopt;                                       \
-try{                                                                                    \
-    transportAA->open();                                                                  \
-    status.ok = true;                                                                   \
-    libcore::VAL resp;                                                                  \
-    client.X(resp, request);                                                            \
-    transportAA->close();                                                                 \
-    reply = std::make_optional(resp);                                                   \
-} catch (const TException &e){                                                          \
-    status.ok = false;                                                                  \
-    status.what = e.what();                                                             \
-    qDebug() << QString::fromUtf8(status.what.c_str());                                    \
-}
+template <typename Response> struct RpcReply {
+    Status status;
+    std::optional<Response> reply;
+};
+
+#define CHANNEL(X, VAL) \
+auto socketAA = getThriftTransport(#X); \
+auto rpcReplyAA = responsiveTask([socketAA, request] { \
+    RpcReply<libcore::VAL> resultAA; \
+    try { \
+        auto transportAA = std::make_shared<TBufferedTransport>(socketAA); \
+        auto protocolAA = std::make_shared<TBinaryProtocol>(transportAA); \
+        libcore::LibcoreServiceClient clientAA(protocolAA); \
+        transportAA->open(); \
+        libcore::VAL responseAA; \
+        clientAA.X(responseAA, request); \
+        transportAA->close(); \
+        resultAA.reply = std::move(responseAA); \
+        resultAA.status.ok = true; \
+    } catch (const std::exception &e) { \
+        resultAA.status.what = e.what(); \
+    } \
+    return resultAA; \
+}); \
+auto status = std::move(rpcReplyAA.status); \
+auto reply = std::move(rpcReplyAA.reply);
 
 #define NOT_OK                                                      \
     *rpcOK = false;                                                 \

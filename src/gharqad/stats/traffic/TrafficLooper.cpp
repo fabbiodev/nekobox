@@ -143,27 +143,34 @@ void TrafficLooper::Loop() {
     }
 
     // do update
-    loop_mutex.lock();
-
-    UpdateAll();
-
-    loop_mutex.unlock();
+    QString summary;
+    const auto epoch = generation.load();
+    QList<int> profileIds;
+    int proxyDl, proxyUl, directDl, directUl;
+    {
+      QMutexLocker lock(&loop_mutex);
+      // A stop may have been queued while the previous poll owned the lock.
+      if (!loop_enabled) continue;
+      UpdateAll();
+      if (!loop_enabled) continue;
+      summary = QObject::tr("Proxy: ⚡%1 📦%3\nDirect: ⚡%2 📦%4")
+                    .arg(proxy->DisplaySpeed(), direct->DisplaySpeed(),
+                         proxy->DisplayTraffic(), direct->DisplayTraffic());
+      proxyDl = proxy->downlink_rate;
+      proxyUl = proxy->uplink_rate;
+      directDl = direct->downlink_rate;
+      directUl = direct->uplink_rate;
+      for (const auto &item : items)
+        if (item->id >= 0) profileIds.append(item->id);
+    }
 
     // post to UI
     runOnUiThread([=, this] {
       auto m = GetMainWindow();
-      if (proxy != nullptr) {
-        m->refresh_status(
-            QObject::tr("Proxy: ⚡%1 📦%3\nDirect: ⚡%2 📦%4")
-                .arg(proxy->DisplaySpeed(), direct->DisplaySpeed(), proxy->DisplayTraffic(), direct->DisplayTraffic()));
-        m->update_traffic_graph(proxy->downlink_rate, proxy->uplink_rate,
-                                direct->downlink_rate, direct->uplink_rate);
-      }
-      for (const auto &item : items) {
-        if (item->id < 0)
-          continue;
-        m->refresh_proxy_traffic(item->id);
-      }
+      if (!m || !loop_enabled || generation.load() != epoch) return;
+      m->refresh_status(summary);
+      m->update_traffic_graph(proxyDl, proxyUl, directDl, directUl);
+      for (const int id : profileIds) m->refresh_proxy_traffic(id);
     });
   }
 }

@@ -623,6 +623,22 @@ Var PID
 Var PPID
 Var PPPID
 Var ExistingInstallDir
+Var InstallStep
+Var InstallLog
+Var HelperResult
+Var HelperOutput
+
+Function LogInstallStep
+  Push $R0
+  ClearErrors
+  FileOpen $R0 "$InstallLog" a
+  ${IfNot} ${Errors}
+    FileWrite $R0 "pid=$PID version=${SOFTWARE_VERSION} target=$INSTDIR step=$InstallStep helper=$HelperResult$\r$\n"
+    FileWrite $R0 "$HelperOutput$\r$\n"
+    FileClose $R0
+  ${EndIf}
+  Pop $R0
+FunctionEnd
 
 !ifndef PSEXEC_INCLUDED
 !define PSEXEC_INCLUDED
@@ -726,7 +742,7 @@ Call openLinkNewWindow
 ${IfNot} ${IsNativeARM64}
   ${If} ${RunningX64}
     ;check H-KEY registry
-    ReadRegDWORD $isInstalled HKLM "SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" "Installed"
+    ReadRegDWORD $isInstalled HKLM "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" "Installed"
 ;    StrCpy $VCRedistDownload "https://aka.ms/vc14/vc_redist.x64.exe"
 ;	StrCpy $VCRedistFile "vc14_redist.x64.exe"
   ${Else}
@@ -766,6 +782,12 @@ ${EndIf}
 
 
 Function .onInit
+    CreateDirectory "$LOCALAPPDATA\NekoBox\logs"
+    StrCpy $InstallLog "$LOCALAPPDATA\NekoBox\logs\installer.log"
+    !ifdef NEKOBOX_INSTALLER_TEST
+      StrCpy $InstallLog "$EXEDIR\installer-test.log"
+    !endif
+    StrCpy $InstallStep "initialize"
 	;get own process info
 	${GetProcessInfo} 0 $0 $1 $2 $3 $4
 	StrCpy $PID "$0"
@@ -787,6 +809,9 @@ Function .onInit
 		StrCpy $isAdmin "1"
 	${EndIf}
 
+    ; An explicit /D= target has priority over registry auto-detection.
+    !ifndef NEKOBOX_INSTALLER_TEST
+    ${If} "$INSTDIR" == "$WINDIR\qr243vbi\non_exists_directory"
     ; Reuse the path recorded by a previous NekoBox installation during upgrades.
     ReadRegStr $ExistingInstallDir HKCU "Software\nekobox" "InstallPath"
     ${If} "$ExistingInstallDir" == ""
@@ -802,6 +827,8 @@ Function .onInit
         IfFileExists "$ExistingInstallDir\${EXECUTABLE_NAME}.exe" 0 +2
         StrCpy $INSTDIR "$ExistingInstallDir"
     ${EndIf}
+    ${EndIf}
+    !endif
 	${If} "$INSTDIR" != "$WINDIR\qr243vbi\non_exists_directory"
 		
 	${Else}
@@ -817,6 +844,7 @@ Function .onInit
 	${EndIf}
 
 	${CreateGUID} $RandomGUID
+    Call LogInstallStep
 FunctionEnd
 
 !define MUI_ICON "res\nekobox.ico"
@@ -909,98 +937,74 @@ Function un.RemoveNetworkFilter
 FunctionEnd
 
 Section "Install"
+  StrCpy $InstallStep "extract complete package to staging"
+  Call LogInstallStep
+  SetOutPath "$INSTDIR\$RandomGUID\payload"
+  SetOverwrite on
+  ClearErrors
+  !ifdef DIRECTORY
+    File /r "${DIRECTORY}\*"
+  !else
+    File /r ".\deployment\windows64\*"
+  !endif
+  IfErrors update_failed
 
-  ; Remove a previously installed filter before replacing older NekoBox files.
-  ; This is migration cleanup only; the new package contains no filter driver.
-  ReadRegStr $0 HKLM "Software\NekoBox" "NetworkFilterInstalled"
-  ${If} "$0" == "1"
-    FindFirst $1 $2 "$INSTDIR\packetfilter\Windows.Packet.Filter*.msi"
-    ${If} "$2" != ""
-      nsExec::ExecToLog 'msiexec.exe /x "$INSTDIR\packetfilter\$2" /passive /norestart'
-      Pop $3
+  ${If} "$NoScript" != "1"
+    StrCpy $InstallStep "backup previous executables"
+    Call LogInstallStep
+    ClearErrors
+    IfFileExists "$INSTDIR\nekobox.exe" 0 +2
+      CopyFiles /SILENT "$INSTDIR\nekobox.exe" "$INSTDIR\$RandomGUID\nekobox.previous.exe"
+    IfFileExists "$INSTDIR\nekobox_core.exe" 0 +2
+      CopyFiles /SILENT "$INSTDIR\nekobox_core.exe" "$INSTDIR\$RandomGUID\nekobox_core.previous.exe"
+    IfErrors update_failed
+
+    StrCpy $InstallStep "stop old processes and wait for their exit"
+    Call LogInstallStep
+    !ifndef NEKOBOX_INSTALLER_TEST
+      !insertmacro "checkVcRedist"
+    !endif
+    ${If} "$VCRedistNeeded" == "1"
+      nsExec::ExecToStack /TIMEOUT=600000 '"$INSTDIR\$RandomGUID\payload\nekobox_core.exe" -installer-mode -kill-processes "$INSTDIR" -vcredist-install -ignore-pid "$PID" -ignore-pid "$PPID" -ignore-pid "$PPPID"'
+    ${Else}
+      nsExec::ExecToStack /TIMEOUT=60000 '"$INSTDIR\$RandomGUID\payload\nekobox_core.exe" -installer-mode -kill-processes "$INSTDIR" -ignore-pid "$PID" -ignore-pid "$PPID" -ignore-pid "$PPPID"'
     ${EndIf}
-    FindClose $1
-    nsExec::ExecToLog 'netcfg.exe -v -u nt_ndisrd'
-    Pop $3
-    DeleteRegValue HKLM "Software\NekoBox" "NetworkFilterInstalled"
-  ${EndIf}
-  RMDir /r "$INSTDIR\packetfilter"
-  Delete "$INSTDIR\install_packet_filter.ps1"
-  Delete "$INSTDIR\rename_packet_filter.ps1"
-
-  !insertmacro "checkVcRedist"
-  
-  ${If} "$NoScript" != "1"
-
-  SetOutPath "$INSTDIR\$RandomGUID"
-  SetOverwrite on
-
-  ; Preserve the runnable pair until all new files have been written.
-  ClearErrors
-  IfFileExists "$INSTDIR\nekobox.exe" 0 +2
-    CopyFiles /SILENT "$INSTDIR\nekobox.exe" "$INSTDIR\$RandomGUID\nekobox.previous.exe"
-  IfFileExists "$INSTDIR\nekobox_core.exe" 0 +2
-    CopyFiles /SILENT "$INSTDIR\nekobox_core.exe" "$INSTDIR\$RandomGUID\nekobox_core.previous.exe"
-  IfErrors update_failed
-
-  !ifdef DIRECTORY
-    File /r  "${DIRECTORY}\nekobox_core.exe"
-  !else
-    File /r  ".\deployment\windows64\nekobox_core.exe"
-  !endif
-
-  ${If} "$VCRedistNeeded" != "1"
-    nsExec::ExecToLog '"$INSTDIR\$RandomGUID\nekobox_core.exe" -installer-mode -kill-processes "$INSTDIR" -ignore-pid "$PID" -ignore-pid "$PPID" -ignore-pid "$PPPID" '
-  ${Else}
-    nsExec::ExecToLog '"$INSTDIR\$RandomGUID\nekobox_core.exe" -installer-mode -kill-processes "$INSTDIR" -vcredist-install -ignore-pid "$PID" -ignore-pid "$PPID" -ignore-pid "$PPPID" '
-  ${EndIf}
-  Pop $0
-  ${If} "$0" != "0"
-    Goto update_failed
-  ${EndIf}
-  ClearErrors
-  ; Always install the packaged core, even when a previous file has a newer timestamp.
-  CopyFiles /SILENT "$INSTDIR\$RandomGUID\nekobox_core.exe" "$INSTDIR\nekobox_core.exe"
-  IfErrors update_failed
-;  ${PowerShellExec} "\
-;    Write-Host $\"=> $INSTDIR$\" ;				\
-;	if ($\"$VCRedistNeeded$\" -eq $\"1$\") {					\
-;		$$url = $\"$VCRedistDownload$\" ;						\
-;		$$download=$$env:USERPROFILE + $\"\Downloads$\"	;		\
-;		$$path = $\"$$download\$VCRedistFile$\" ;				\
-;		if (-not (Test-Path $$path)) {							\
-;			Invoke-WebRequest -Uri $\"$$url$\" -OutFile $$path;	\
-;		} ;														\
-;		Start-Process $$path -Wait ;							\
-;	}; 															\
-;	$$procs = Get-CimInstance Win32_Process | Where-Object { 	\
-;		$$_.ExecutablePath -like $\"$INSTDIR\*.exe$\" ;			\
-;	}; 															\
-;	foreach ($$proc in $$procs) { 								\
-;		Write-Host $\"!! $$proc$\" ;							\
-;		Stop-Process -Id $$proc.ProcessId -Force ; 				\
-;	}; 															\
-;	"
+    Pop $HelperResult
+    Pop $HelperOutput
+    DetailPrint "$HelperOutput"
+    ${If} "$HelperResult" != "0"
+      Goto update_failed
+    ${EndIf}
   ${EndIf}
 
+  StrCpy $InstallStep "replace staged application files"
+  Call LogInstallStep
   SetOutPath "$INSTDIR"
-  SetOverwrite on
   ClearErrors
-
-  ${If} "$NoScript" != "1"
-  !ifdef DIRECTORY
-    File /r /x nekobox_core.exe "${DIRECTORY}\*"
-  !else
-    File /r /x nekobox_core.exe ".\deployment\windows64\*"
-  !endif
-  ${Else}
-  !ifdef DIRECTORY
-    File /r  "${DIRECTORY}\*"
-  !else
-    File /r  ".\deployment\windows64\*"
-  !endif
-  ${EndIf}
+  CopyFiles /SILENT "$INSTDIR\$RandomGUID\payload\*" "$INSTDIR"
   IfErrors update_failed
+
+  !ifndef NEKOBOX_INSTALLER_TEST
+    ; Migration cleanup only, after a complete new package has been staged.
+    ReadRegStr $0 HKLM "Software\NekoBox" "NetworkFilterInstalled"
+    ${If} "$0" == "1"
+      FindFirst $1 $2 "$INSTDIR\packetfilter\Windows.Packet.Filter*.msi"
+      ${If} "$2" != ""
+        nsExec::ExecToLog /TIMEOUT=120000 'msiexec.exe /x "$INSTDIR\packetfilter\$2" /quiet /norestart'
+        Pop $3
+      ${EndIf}
+      FindClose $1
+      nsExec::ExecToLog /TIMEOUT=60000 'netcfg.exe -v -u nt_ndisrd'
+      Pop $3
+      DeleteRegValue HKLM "Software\NekoBox" "NetworkFilterInstalled"
+    ${EndIf}
+    RMDir /r "$INSTDIR\packetfilter"
+    Delete "$INSTDIR\install_packet_filter.ps1"
+    Delete "$INSTDIR\rename_packet_filter.ps1"
+  !endif
+  StrCpy $InstallStep "record installation metadata"
+  Call LogInstallStep
+  ClearErrors
 
   ${If} "$Winget" == "1"
     WriteINIStr "$INSTDIR\global.ini" "General" "winget_package" "true"
@@ -1015,9 +1019,15 @@ Section "Install"
   WriteINIStr "$INSTDIR\global.ini" "General" "program_version" "${SOFTWARE_VERSION}"
 
   ${If} "$UnpackOnly" != "1"
+    ; A portable installation already has a settings DIRECTORY. Never replace
+    ; it with the marker file or treat the failed FileOpen as update failure.
+    IfFileExists "$INSTDIR\settings\*.*" settings_ready
+    IfFileExists "$INSTDIR\settings" settings_ready
     FileOpen $0 "$INSTDIR\settings" w
     FileWrite $0 "DeleteToUseThisDirectoryForConfig"
 	FileClose $0
+settings_ready:
+    !ifndef NEKOBOX_INSTALLER_TEST
 
     CreateShortcut "$desktop\${SOFTWARE_NAME}.lnk" "$INSTDIR\${EXECUTABLE_NAME}.exe" "" "$INSTDIR\${EXECUTABLE_NAME}.exe" 0
     CreateShortcut "$SMPROGRAMS\${SOFTWARE_NAME}.lnk" "$INSTDIR\${EXECUTABLE_NAME}.exe" "" "$INSTDIR\${EXECUTABLE_NAME}.exe" 0
@@ -1033,18 +1043,24 @@ Section "Install"
     !insertmacro RegInteger "Software\Microsoft\Windows\CurrentVersion\Uninstall\nekobox" "NoModify" 1
     !insertmacro RegInteger "Software\Microsoft\Windows\CurrentVersion\Uninstall\nekobox" "NoRepair" 1
     WriteUninstaller "uninstall.exe"
+    !endif
   ${EndIf}
   IfErrors update_failed
   ; Cleanup is restricted to this installation's unique staging directory.
   RMDir /r "$INSTDIR\$RandomGUID"
+  StrCpy $InstallStep "completed"
+  Call LogInstallStep
   Goto update_done
 update_failed:
+  StrCpy $InstallStep "FAILED: $InstallStep"
+  Call LogInstallStep
   SetErrorLevel 1
   Abort "NekoBox update failed. The previous executable pair will be restored."
 update_done:
 SectionEnd
 
 Function .onInstFailed
+  Call LogInstallStep
   SetErrorLevel 1
   IfFileExists "$INSTDIR\$RandomGUID\nekobox.previous.exe" 0 +2
     CopyFiles /SILENT "$INSTDIR\$RandomGUID\nekobox.previous.exe" "$INSTDIR\nekobox.exe"
