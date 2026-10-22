@@ -23,6 +23,7 @@ umask 077
 key_dir="$(mktemp -d "$temp_root/nekobox-core-ssh.XXXXXX")"
 printf 'NEKOBOX_CORE_SSH_DIR=%s\n' "$key_dir" >> "$GITHUB_ENV"
 printf '%s\n' "${CORE_REPO_DEPLOY_KEY//$'\r'/}" > "$key_dir/deploy_key"
+: > "$key_dir/config"
 
 scanned=false
 for attempt in 1 2 3; do
@@ -34,8 +35,25 @@ for attempt in 1 2 3; do
 done
 [[ "$scanned" == true ]]
 
-printf -v ssh_command '%q -F /dev/null -i %q -o IdentitiesOnly=yes -o UserKnownHostsFile=%q -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20' \
-  "$ssh_bin" "$key_dir/deploy_key" "$key_dir/known_hosts"
+ssh_path="$ssh_bin"
+config_path="$key_dir/config"
+key_path="$key_dir/deploy_key"
+hosts_path="$key_dir/known_hosts"
+if [[ "${RUNNER_OS:-}" == Windows ]]; then
+  ssh_path="$(cygpath -m "$ssh_path")"
+  config_path="$(cygpath -m "$config_path")"
+  key_path="$(cygpath -m "$key_path")"
+  hosts_path="$(cygpath -m "$hosts_path")"
+  # MSYS otherwise rewrites an unquoted /usr/bin/ssh prefix to a native
+  # Program Files path. Preserve the already-quoted native command verbatim.
+  export MSYS2_ENV_CONV_EXCL="${MSYS2_ENV_CONV_EXCL:+$MSYS2_ENV_CONV_EXCL;}GIT_SSH_COMMAND"
+  printf 'MSYS2_ENV_CONV_EXCL=%s\n' "$MSYS2_ENV_CONV_EXCL" >> "$GITHUB_ENV"
+fi
+# SSH parses UserKnownHostsFile as a list itself. Keep quoted paths in a
+# config file so a temporary directory containing spaces remains one path.
+printf 'Host github.com\n  IdentityFile "%s"\n  UserKnownHostsFile "%s"\n  IdentitiesOnly yes\n  StrictHostKeyChecking yes\n  BatchMode yes\n  ConnectTimeout 20\n' \
+  "$key_path" "$hosts_path" > "$key_dir/config"
+printf -v ssh_command '"%s" -F "%s"' "$ssh_path" "$config_path"
 printf 'GIT_SSH_COMMAND=%s\n' "$ssh_command" >> "$GITHUB_ENV"
 git config --global url."git@github.com:1maxwarner/nekobox-sing-box-core".insteadOf \
   "https://github.com/1maxwarner/nekobox-sing-box-core"
