@@ -8,10 +8,12 @@ on:
       - 'core/**'
       - '.github/workflows/core-regression.yml'
       - '.github/workflows/build.yml'
+      - '.github/scripts/**'
   pull_request:
     paths:
       - 'core/**'
       - '.github/workflows/core-regression.yml'
+      - '.github/scripts/**'
 
 permissions:
   contents: read
@@ -35,14 +37,7 @@ jobs:
         shell: bash
         env:
           CORE_REPO_DEPLOY_KEY: ${{ secrets.CORE_REPO_DEPLOY_KEY }}
-        run: |
-          set -euo pipefail
-          test -n "$CORE_REPO_DEPLOY_KEY"
-          install -d -m 700 "$HOME/.ssh"
-          printf '%s\n' "$CORE_REPO_DEPLOY_KEY" > "$HOME/.ssh/id_ed25519"
-          chmod 600 "$HOME/.ssh/id_ed25519"
-          ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts"
-          git config --global url."git@github.com:1maxwarner/nekobox-sing-box-core".insteadOf "https://github.com/1maxwarner/nekobox-sing-box-core"
+        run: bash .github/scripts/setup-private-core.sh
       - name: Exercise real AWG tunnels and reject malformed profiles
         working-directory: core/server
         env:
@@ -55,3 +50,7 @@ jobs:
         env:
           CGO_ENABLED: '0'
         run: go test ./... -count=10 -timeout=90s
+      - name: Remove temporary deploy key
+        if: always() && env.NEKOBOX_CORE_SSH_DIR != ''
+        shell: bash
+        run: bash .github/scripts/cleanup-private-core.sh

@@ -212,14 +212,7 @@ jobs:
         shell: bash
         env:
           CORE_REPO_DEPLOY_KEY: ${{ secrets.CORE_REPO_DEPLOY_KEY }}
-        run: |
-          set -euo pipefail
-          test -n "${CORE_REPO_DEPLOY_KEY}"
-          install -d -m 700 "${HOME}/.ssh"
-          printf '%s\n' "${CORE_REPO_DEPLOY_KEY}" > "${HOME}/.ssh/id_ed25519"
-          chmod 600 "${HOME}/.ssh/id_ed25519"
-          ssh-keyscan -t ed25519 github.com >> "${HOME}/.ssh/known_hosts"
-          git config --global url."git@github.com:1maxwarner/nekobox-sing-box-core".insteadOf "https://github.com/1maxwarner/nekobox-sing-box-core"
+        run: bash .github/scripts/setup-private-core.sh
       - name: Install Golang
         if: ( matrix.cross_os == 'public' || ( github.event.inputs.source_only  != 'true' && matrix.allow == 'true' ) ) && steps.check-common.outputs.needs_build != 'false'
         uses: actions/setup-go@main
@@ -281,6 +274,10 @@ jobs:
         with:
           name: nekobox-${{ github.sha }}-Common-${{ matrix.cross_os }}-${{ matrix.cross_arch }}
           path: artifacts.tgz
+      - name: Remove temporary deploy key
+        if: always() && env.NEKOBOX_CORE_SSH_DIR != ''
+        shell: bash
+        run: bash .github/scripts/cleanup-private-core.sh
 
   upload_aur:
     name: Upload to Open Build Service and Aur
