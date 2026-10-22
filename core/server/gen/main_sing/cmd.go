@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/experimental/deprecated"
-	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/service"
 	"github.com/sagernet/sing/service/filemanager"
+	"nekobox_core/internal/coreinclude"
 
 	"github.com/spf13/cobra"
 )
@@ -67,5 +67,5 @@ func preRun(cmd *cobra.Command, args []string) {
 	if len(configPaths) == 0 && len(configDirectories) == 0 {
 		configPaths = append(configPaths, "config.json")
 	}
-	globalCtx = include.Context(service.ContextWith(globalCtx, deprecated.NewStderrManager(log.StdLogger())))
+	globalCtx = coreinclude.Context(service.ContextWith(globalCtx, deprecated.NewStderrManager(log.StdLogger())))
 }

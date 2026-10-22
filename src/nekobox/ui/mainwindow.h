@@ -413,6 +413,7 @@ private:
     int exit_reason = 0;
     //
     QMutex mu_download_update;
+    QMutex mu_check_update;
     //
     int toolTipID;
     //

@@ -1,279 +1,72 @@
 #include <nekobox/global/HTTPRequestHelperGui.hpp>
-#include <cpr/proxyauth.h>
-#include <cpr/cpr.h>
-
-
-#include <QString>
-#include <QFile>
+#include <nekobox/dataStore/Configs.hpp>
+#include <nekobox/ui/mainwindow.h>
 #include <QDir>
 #include <QFileInfo>
-#include <QMap>
-
-#include <string>
-
-#include <nekobox/dataStore/Configs.hpp>
-#include <nekobox/global/DeviceDetailsHelper.hpp>
-#include <nekobox/ui/mainwindow.h>
+#include <QPointer>
+#include <QSaveFile>
+#include <algorithm>
 
 QString Configs_network::NetworkRequestHelperGui::DownloadAsset(const QString &url, const QString &fileName)
 {
     QString result;
     QEventLoop loop;
-
-    QString filePath = Configs::GetBasePath() + "/" + fileName;
-
-    QFuture future = QtConcurrent::run([=, &result, &loop]()
-    {
+    const QString filePath = QDir(Configs::GetBasePath()).absoluteFilePath(fileName);
+    const QPointer<MainWindow> window(GetMainWindow());
+    const int attempts = std::clamp(Configs::dataStore->download_retries, 1, 5);
+    auto future = QtConcurrent::run([=, &result, &loop] {
         QDir().mkpath(QFileInfo(filePath).absolutePath());
-
-        auto mw = GetMainWindow();
-
-        const int maxRetries = Configs::dataStore->download_retries;
-        cpr::Response r;
-
-        for (int i = 0; i < maxRetries; ++i)
-        {
-            // =========================
-            // NEW SESSION PER TRY (IMPORTANT FIX)
-            // =========================
+        result = "Download failed";
+        for (int attempt = 0; attempt < attempts; ++attempt) {
+            // Do not append to unverified bytes: a server can ignore Range or
+            // an asset can be replaced between download attempts.
+            QSaveFile file(filePath);
+            file.setDirectWriteFallback(false);
+            if (!file.open(QIODevice::WriteOnly)) {
+                result = file.errorString();
+                break;
+            }
             cpr::Session session;
             BuildSession(url, false, session);
-
-            qint64 existingSize = QFileInfo(filePath).exists()
-                ? QFileInfo(filePath).size()
-                : 0;
-
-            // =========================
-            // RESUME HEADER (RESET EACH TRY)
-            // =========================
-            if (existingSize > 0)
-            {
-                session.SetHeader({
-                    {"Range", "bytes=" + std::to_string(existingSize) + "-"}
-                });
-            }
-
-            // =========================
-            // FILE OPEN (ONCE PER TRY)
-            // =========================
-            QFile file(filePath);
-
-            if (!file.open(existingSize > 0
-                    ? QIODevice::Append
-                    : QIODevice::WriteOnly))
-            {
-                result = "Could not open file.";
-                QMetaObject::invokeMethod(&loop, "quit", Qt::QueuedConnection);
-                return;
-            }
-
-
-        // ------------------------
-        // STREAM WRITE CALLBACK
-        // ------------------------
-        std::function<bool(std::string_view data, intptr_t userdata)> write_callback;
-        write_callback = [&](std::string_view data, intptr_t)->bool
-            {
-                file.write(data.data(), data.size());
+            session.SetVerifySsl(cpr::VerifySsl{true});
+            qint64 received = 0;
+            constexpr qint64 maxAssetSize = 1024LL * 1024 * 1024;
+            session.SetWriteCallback(cpr::WriteCallback{[&](std::string_view data, intptr_t) {
+                if (data.size() > static_cast<size_t>(maxAssetSize - received)) return false;
+                const auto size = static_cast<qint64>(data.size());
+                if (file.write(data.data(), size) != size) return false;
+                received += size;
                 return true;
-            };
-
-        // ------------------------
-        // PROGRESS CALLBACK
-        // ------------------------
-
-        std::function<bool(cpr::cpr_pf_arg_t downloadTotal, cpr::cpr_pf_arg_t downloadNow, cpr::cpr_pf_arg_t uploadTotal, cpr::cpr_pf_arg_t uploadNow, intptr_t userdata)> progress_callback = 
-
-
-[&](cpr::cpr_off_t total,
-                cpr::cpr_off_t now,
-                cpr::cpr_off_t uptotal,
-                cpr::cpr_off_t upnow, intptr_t )
-            {
-                if (!mw || mw->isShowRuleSetData())
-                    return true;
-
-                runOnUiThread([=]{
-                    mw->setDownloadReport(
-                        DownloadProgressReport{
-                            fileName,
-                            (qint64)now,
-                            (qint64)total
-                        },
-                        true
-                    );
-                    mw->UpdateDataView();
+            }});
+            session.SetProgressCallback(cpr::ProgressCallback{[=](cpr::cpr_pf_arg_t total, cpr::cpr_pf_arg_t now,
+                                            cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, intptr_t) {
+                if (total > maxAssetSize) return false;
+                runOnUiThread([=] {
+                    if (!window || window->isShowRuleSetData()) return;
+                    window->setDownloadReport(DownloadProgressReport{fileName, (qint64)now, (qint64)total}, true);
+                    window->UpdateDataView();
                 });
-
                 return true;
-            };
-
-            // =========================
-            // WRITE CALLBACK
-            // =========================
-            session.SetWriteCallback(
-                write_callback
-            );
-
-            // =========================
-            // PROGRESS CALLBACK
-            // =========================
-            session.SetProgressCallback(
-                progress_callback
-            );
-
-            // =========================
-            // EXECUTE
-            // =========================
-            r = session.Get();
-
-            file.close();
-
-            // =========================
-            // SUCCESS
-            // =========================
-            if (!r.error)
+            }});
+            const auto response = session.Get();
+            if (!response.error && response.status_code == 200 && received > 0) {
+                if (file.commit()) result.clear();
+                else result = file.errorString();
                 break;
-
-            // backoff
-            int delay = std::min(10000, (1 << i) * 1000);
-            QThread::msleep(delay);
+            }
+            file.cancelWriting();
+            result = response.error ? QString::fromStdString(response.error.message)
+                                    : QString("HTTP %1 or empty download").arg(response.status_code);
+            if (attempt + 1 < attempts) QThread::msleep(500 * (attempt + 1));
         }
-
-        // =========================
-        // RESET UI
-        // =========================
-        runOnUiThread([=]{
-            mw->setDownloadReport({}, false);
-            mw->UpdateDataView(true);
+        runOnUiThread([=] {
+            if (!window) return;
+            window->setDownloadReport({}, false);
+            window->UpdateDataView(true);
         });
-
-        // =========================
-        // ERROR HANDLING
-        // =========================
-        if (r.error)
-        {
-            result = QString::fromStdString(r.error.message);
-
-            qint64 size = QFileInfo(filePath).exists()
-                ? QFileInfo(filePath).size()
-                : 0;
-
-            result += "\n(fetched: " + QString::number(size) + ")";
-        }
-
         QMetaObject::invokeMethod(&loop, "quit", Qt::QueuedConnection);
     });
-
-    loop.exec();
-    future.waitForFinished();
-
-    return result;
-}
-
-/*
-QString NetworkRequestHelper::DownloadAsset(const QString &url, const QString &fileName)
-{
-    QString result;
-    QEventLoop loop;
-
-    QFuture future = QtConcurrent::run([=, &result, &loop]()
-    {
-        cpr::Session session;
-        BuildSession(url, false, session);
-
-        QString filePath = Configs::GetBasePath() + "/" + fileName;
-        QDir().mkpath(QFileInfo(filePath).absolutePath());
-
-        QFile file(filePath);
-        if (!file.open(QIODevice::WriteOnly)) {
-            result = "Could not open file.";
-            QMetaObject::invokeMethod(&loop, "quit", Qt::QueuedConnection);
-            return;
-        }
-
-        auto mw = GetMainWindow();
-
-        // ------------------------
-        // STREAM WRITE CALLBACK
-        // ------------------------
-        std::function<bool(std::string_view data, intptr_t userdata)> write_callback;
-        write_callback = [&](std::string_view data, intptr_t)->bool
-            {
-                file.write(data.data(), data.size());
-                return true;
-            };
-
-        // ------------------------
-        // PROGRESS CALLBACK
-        // ------------------------
-
-std::function<bool(cpr::cpr_pf_arg_t downloadTotal, cpr::cpr_pf_arg_t downloadNow, cpr::cpr_pf_arg_t uploadTotal, cpr::cpr_pf_arg_t uploadNow, intptr_t userdata)> progress_callback = 
-
-
-[&](cpr::cpr_off_t total,
-                cpr::cpr_off_t now,
-                cpr::cpr_off_t uptotal,
-                cpr::cpr_off_t upnow, intptr_t )
-            {
-                if (!mw || mw->isShowRuleSetData())
-                    return true;
-
-                runOnUiThread([=]{
-                    mw->setDownloadReport(
-                        DownloadProgressReport{
-                            fileName,
-                            (qint64)now,
-                            (qint64)total
-                        },
-                        true
-                    );
-                    mw->UpdateDataView();
-                });
-
-                return true;
-            };
-
-        session.SetProgressCallback(
-            progress_callback
-        );
-
-        // ------------------------
-        // RETRY LOGIC (25x)
-        // ------------------------
-        cpr::Response r;
-
-        for (int i = 0; i < 25; ++i)
-        {
-            r = session.Get();
-
-            if (!r.error)
-                break;
-
-            if (
-                r.error.code != cpr::ErrorCode::OPERATION_TIMEDOUT )
-                break;
-
-            QThread::msleep(500 * (i + 1));
-        }
-
-        file.close();
-
-        // reset UI
-        runOnUiThread([=]{
-            mw->setDownloadReport({}, false);
-            mw->UpdateDataView(true);
-        });
-
-        if (r.error) {
-            result = QString::fromStdString(r.error.message);
-        }
-
-        QMetaObject::invokeMethod(&loop, "quit", Qt::QueuedConnection);
-    });
-
     loop.exec();
     future.waitForFinished();
     return result;
 }
-*/

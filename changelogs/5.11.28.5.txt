@@ -1,10 +1,8 @@
-- fix: restore VLESS XHTTP and Reality compatibility with the pinned project core
-- fix: use the official Hysteria2 transport for single-port Salamander profiles
-- fix: preserve VLESS Reality gRPC streams after dial context cancellation
-- fix: retry Void Linux dependency installation across mirrors for ARMv7 builds
-- fix: route only selected applications in Windows Packet Filter mode instead of sending every process through the proxy
-- fix: derive the native packet-filter intercept list from Game Mod services and manual proxy rules; keep Direct apps bypassing the proxy
-- feat: embed the Windows packet-filter capture and redirect engine into nekobox.exe without a ProxiFyre/Proxyfier helper process
-- fix: harden Windows Packet Filter driver installation against MSI error 1603 with component cleanup, product removal, verbose logging, and reboot detection
-- fix: rename the packet-filter adapter to "Nekobox Network Filter" on the runtime install path, not only through the NSIS installer
-- fix: make Game Mod process matching apply on Linux and macOS by matching extensionless binaries, not only Windows .exe files
+- fix: build Windows and Linux cores with Go 1.26.10, including the Windows asynchronous socket I/O fix
+- fix: reject stale cached cores and stop a restart if the previous core is still running
+- feat: import, edit and run AmneziaWG 3.1 profiles with header protection, padding, timing ranges and trailers
+- fix: apply AWG padding before the first packet and drain netstack teardown packets to prevent shutdown deadlocks
+- fix: download updates atomically, reject HTTP/write failures and verify release SHA-256 before installation
+- fix: propagate Windows installer errors and preserve the previous GUI/core pair until replacement succeeds
+- fix: stage Linux updates, reject unsafe/incomplete archives and restore replaced files after an installation error
+- build: run Windows/Linux regression checks before building packages and publish releases only after all selected builds succeed

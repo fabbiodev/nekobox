@@ -17,6 +17,8 @@
 #include <QDir>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QCryptographicHash>
+#include <QRegularExpression>
 
 
 
@@ -92,6 +94,14 @@ void JsUpdaterWindow::log(const QVariant value, const QVariant title){
     emit log_signal(value1, title1);
  //   queue->Push(MessagePart{value.toString(), title.toString(), 1});
 }
+bool JsUpdaterWindow::verify_file(const QVariant value, const QVariant digest) {
+    const QString hash = digest.toString().toLower();
+    if (!QRegularExpression("^sha256:[0-9a-f]{64}$").match(hash).hasMatch()) return false;
+    QFile file(QDir(Configs::GetBasePath()).absoluteFilePath(value.toString()));
+    if (!file.open(QIODevice::ReadOnly) || file.size() == 0) return false;
+    QCryptographicHash sha(QCryptographicHash::Sha256);
+    return sha.addData(&file) && QString::fromLatin1(sha.result().toHex()) == hash.mid(7);
+}
 void JsUpdaterWindow::warning(const QVariant value, const QVariant title){
     QString value1 = value.toString();
     QString title1 = title.toString();
@@ -99,11 +109,11 @@ void JsUpdaterWindow::warning(const QVariant value, const QVariant title){
  //   queue->Push(MessagePart{value.toString(), title.toString(), 2});
 }
 void JsUpdaterWindow::unlock(){
-    mutex.unlock();
+    response.release();
 };
 
 QString JsUpdaterWindow::curdir(){
-    return QDir::currentPath();
+    return Configs::GetBasePath();
 }
 
 void JsUpdaterWindow::open_url(const QVariant url){
@@ -113,18 +123,16 @@ void JsUpdaterWindow::open_url(const QVariant url){
 QString JsUpdaterWindow::download(const QVariant value, const QVariant title, const QVariant skipIfExists){
     bool skip_if_exists = skipIfExists.toBool();
     QString url = value.toString();
-    QString fileName = "./" + title.toString();
+    QString fileName = title.toString();
     QString ret;
     if (skip_if_exists){
-        QFile asset(fileName);
+        QFile asset(QDir(Configs::GetBasePath()).absoluteFilePath(fileName));
         if (asset.exists()){
             return "";
         };
     }
-    mutex.lock();
     emit download_signal(url, fileName, &ret);
-    mutex.lock();
-    mutex.unlock();
+    response.acquire();
     return ret;
 }
 
@@ -132,11 +140,9 @@ int JsUpdaterWindow::ask(const QVariant value, const QVariant title, const QVari
     QString value1 = value.toString();
     QString title1 = title.toString();
     QStringList map1 = map.toStringList();
-    int ret;
-    mutex.lock();
+    int ret = -1;
     emit ask_signal(value1, title1, map1, &ret);
-    mutex.lock();
-    mutex.unlock();
+    response.acquire();
     return ret;
 }
 void JsUpdaterWindow::info(const QVariant value, const QVariant title){
@@ -437,6 +443,11 @@ static JSValue js_window_download(JSContext* ctx, JSValueConst this_val, int arg
     QString res = self->download(url, name, skip);
     return JS_NewString(ctx, res.toUtf8().constData());
 }
+static JSValue js_window_verify_file(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    GET_WINDOW_INSTANCE();
+    if (argc < 2) return JS_FALSE;
+    return JS_NewBool(ctx, self->verify_file(jsvalue_to_qvariant(ctx, argv[0]), jsvalue_to_qvariant(ctx, argv[1])));
+}
 
 static JSValue js_window_curdir(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     GET_WINDOW_INSTANCE();
@@ -458,6 +469,7 @@ static const JSCFunctionListEntry js_updater_window_proto_funcs[] = {
     JS_CFUNC_DEF("warning", 2, js_window_warning),
     JS_CFUNC_DEF("info", 2, js_window_info),
     JS_CFUNC_DEF("file_exists", 1, js_window_file_exists),
+    JS_CFUNC_DEF("verify_file", 2, js_window_verify_file),
     JS_CFUNC_DEF("ask", 3, js_window_ask),
     JS_CFUNC_DEF("get_jsdelivr_link", 1, js_window_get_jsdelivr_link),
     JS_CFUNC_DEF("translate", 1, js_window_translate),

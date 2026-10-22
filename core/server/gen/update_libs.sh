@@ -1,8 +1,9 @@
 #!/bin/bash
+set -euo pipefail
 shopt -s extglob
 shopt -s globstar
 
-cd `dirname "$(realpath $0)"`
+cd -- "$(dirname -- "$(realpath -- "$0")")"
 rm -rf *.go
 rm -rf libcore_service-remote
 
@@ -15,12 +16,13 @@ if [[ ! -d main_sing ]]
 then
 
 mkdir main_sing
-cp ${SING_BOX:-../sing-box}/cmd/sing-box/cmd*.go main_sing
+cp "${SING_BOX:-../sing-box}"/cmd/sing-box/cmd*.go main_sing
 #!(*_stub.go) main_sing
 
-for i in $(ls main_sing)
+for i in main_sing/*.go
 do
-sed -i 's/package main/package main_sing/g;' main_sing/$i
+sed -i 's/package main/package main_sing/g;' "$i"
+sed -i 's|"github.com/sagernet/sing-box/include"|"nekobox_core/internal/coreinclude"|g; s/include.Context(/coreinclude.Context(/g' "$i"
 done
 
 cat << 'EOF' > main_sing/main_sing.go

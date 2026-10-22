@@ -13,6 +13,8 @@ namespace Configs {
         QString preSharedKey;
         QList<int> reserved;
         int persistentKeepalive = 0;
+        // Kept separately so existing integer-valued profile databases migrate unchanged.
+        QString persistentKeepaliveRange;
         QStringList localAddress;
         int MTU = 1420;
         bool useSystemInterface = false;
@@ -38,6 +40,16 @@ namespace Configs {
         QString i4;
         QString i5;
 
+        QString header_protection_key;
+        QString content_padding_addition;
+        QString rekey_after_time;
+        QString rekey_timeout;
+        QString reject_after_time;
+        QString keepalive_timeout;
+        QString max_handshake_attempts;
+        bool random_trailers = false;
+        bool disable_cookies = false;
+
         WireguardBean(Configs::ProxyEntity * entity, bool amnezia = false) : AbstractBean(entity, 0), is_amnezia(amnezia) {
         }
 
@@ -47,6 +59,7 @@ namespace Configs {
             ADD_MAP("pre_shared_key", preSharedKey, string);
             ADD_MAP("reserved", reserved, integerList);
             ADD_MAP("persistent_keepalive", persistentKeepalive, integer);
+            ADD_MAP("persistent_keepalive_range", persistentKeepaliveRange, string);
             ADD_MAP("local_address", localAddress, stringList);
             ADD_MAP("mtu", MTU, integer);
             ADD_MAP("use_system_proxy", useSystemInterface, boolean);
@@ -71,6 +84,15 @@ namespace Configs {
             ADD_MAP("i3", i3, string);
             ADD_MAP("i4", i4, string);
             ADD_MAP("i5", i5, string);
+            ADD_MAP("header_protection_key", header_protection_key, string);
+            ADD_MAP("content_padding_addition", content_padding_addition, string);
+            ADD_MAP("rekey_after_time", rekey_after_time, string);
+            ADD_MAP("rekey_timeout", rekey_timeout, string);
+            ADD_MAP("reject_after_time", reject_after_time, string);
+            ADD_MAP("keepalive_timeout", keepalive_timeout, string);
+            ADD_MAP("max_handshake_attempts", max_handshake_attempts, string);
+            ADD_MAP("random_trailers", random_trailers, boolean);
+            ADD_MAP("disable_cookies", disable_cookies, boolean);
         STOP_MAP
 
         QString FormatReserved() const;
@@ -90,6 +112,7 @@ namespace Configs {
         bool parseAmneziaVpnLink(const QString &link);
 
         bool ValidateAmnezia() const;
+        bool HasAmnezia31Options() const;
 
         QString ToShareLink() const override;
 

@@ -8,6 +8,7 @@
 #include <nekobox/dataStore/Group.hpp>
 #include <QTextStream>
 #include <functional>
+#include <QSemaphore>
 #include <QStringList>
 #include <nekobox/dataStore/HTTPRequestHelper.hpp>
 
@@ -21,6 +22,7 @@ public:
     Q_INVOKABLE void warning(const QVariant message, const QVariant title);
     Q_INVOKABLE void info(const QVariant message, const QVariant title);
     Q_INVOKABLE bool file_exists(const QVariant file);
+    Q_INVOKABLE bool verify_file(const QVariant file, const QVariant digest);
     Q_INVOKABLE int ask(const QVariant value, const QVariant title, const QVariant map);
     Q_INVOKABLE QString get_jsdelivr_link(const QVariant value);
     Q_INVOKABLE QString translate(const QVariant value);
@@ -28,7 +30,7 @@ public:
     Q_INVOKABLE QString download(const QVariant url, const QVariant fileName, const QVariant skipIfExists);
     Q_INVOKABLE QString curdir();
     Q_INVOKABLE void open_url(const QVariant url);
-    QMutex mutex;
+    QSemaphore response;
 signals:
     void log_signal(const QString &value, const QString &title);
     void warning_signal(const QString &value, const QString &title);

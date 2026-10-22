@@ -209,7 +209,9 @@ namespace Configs_sys {
             process.kill();
             if (!process.waitForFinished(3000)) {
                 MW_show_log(
-                    "[Warn] Timed out waiting for the old core during restart.");
+                    "[Error] Old core is still running; restart aborted to avoid duplicate RPC/TUN instances.");
+                restarting.unlock();
+                return;
             }
         }
         started = false;

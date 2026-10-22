@@ -3,119 +3,158 @@
 package main
 
 import (
-	"context"
-	"log"
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/codeclysm/extract/v4"
 )
 
-func Updater(updatePackagePath string, verbose bool) {
-	pre_cleanup := func() {
-		os.RemoveAll("./usr")
-		os.RemoveAll("./nekobox_update")
-	}
-
-	// find update package
-	if !Exist(updatePackagePath) {
-		log.Fatalln("no update")
-	}
-	log.Println("updating from", updatePackagePath)
-
-	dir, err := os.Getwd()
-	if err != nil {
-		log.Fatalln(err)
-	}
-	// extract update package
-	if strings.HasSuffix(updatePackagePath, ".zip") {
-		pre_cleanup()
-		f, err := os.Open(updatePackagePath)
-		if err != nil {
-			log.Fatalln(err.Error())
-		}
-		err = extract.Zip(context.Background(), f, dir+string(os.PathSeparator)+"nekobox_update", nil)
-		if err != nil {
-			log.Fatalln(err.Error())
-		}
-		f.Close()
-	} else if strings.HasSuffix(updatePackagePath, ".tar.gz") || strings.HasSuffix(updatePackagePath, ".tgz") {
-		pre_cleanup()
-		f, err := os.Open(updatePackagePath)
-		if err != nil {
-			log.Fatalln(err.Error())
-		}
-		err = extract.Gz(context.Background(), f, dir+string(os.PathSeparator)+"nekobox_update", nil)
-		if err != nil {
-			log.Fatalln(err.Error())
-		}
-		f.Close()
-	}
-
-	// remove old file
-
-	// update move
-	err = Mv("./nekobox_update/nekobox", "./")
-	if err != nil {
-		MessageBoxPlain("nekobox Updater", "Update failed. Please close the running instance and run the updater again.\n\n"+err.Error())
-		log.Fatalln(err.Error())
-	}
-
-	os.RemoveAll("./nekobox_update")
-	os.RemoveAll("./nekobox.zip")
-	os.RemoveAll("./nekobox.tar.gz")
-	os.RemoveAll("./nekobox.tgz")
-}
-
-func Exist(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-func FindExist(paths []string) string {
-	for _, path := range paths {
-		if Exist(path) {
-			return path
-		}
-	}
-	return ""
-}
-
-func Mv(src, dst string) error {
-	s, err := os.Stat(src)
+func Updater(pkg, install string) error {
+	info, err := os.Stat(install)
 	if err != nil {
 		return err
 	}
-	if s.IsDir() {
-		es, err := os.ReadDir(src)
+	// AppImage updates replace one executable, not a directory tree.
+	parent := install
+	if !info.IsDir() {
+		parent = filepath.Dir(install)
+	}
+	stage, err := os.MkdirTemp(parent, ".nekobox-update-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stage)
+	if !info.IsDir() {
+		if !strings.HasSuffix(pkg, ".AppImage") {
+			return fmt.Errorf("expected an AppImage update")
+		}
+		in, err := os.Open(pkg)
 		if err != nil {
 			return err
 		}
-		for _, e := range es {
-			err = Mv(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()))
+		defer in.Close()
+		if err := writeStaged(stage, filepath.Base(install), in, 0755, infoSize(pkg)); err != nil {
+			return err
+		}
+		return installTree(stage, parent, os.Rename)
+	}
+	if strings.HasSuffix(pkg, ".zip") {
+		reader, err := zip.OpenReader(pkg)
+		if err != nil {
+			return err
+		}
+		defer reader.Close()
+		var total int64
+		for i, entry := range reader.File {
+			if i > 20000 || entry.UncompressedSize64 > 1<<30 {
+				return fmt.Errorf("update archive too large")
+			}
+			if entry.FileInfo().IsDir() {
+				continue
+			}
+			if !entry.Mode().IsRegular() {
+				return fmt.Errorf("non-regular update entry")
+			}
+			total += int64(entry.UncompressedSize64)
+			if total > 2<<30 {
+				return fmt.Errorf("update archive too large")
+			}
+			file, err := entry.Open()
+			if err != nil {
+				return err
+			}
+			err = writeStaged(stage, entry.Name, file, entry.Mode().Perm(), int64(entry.UncompressedSize64))
+			file.Close()
 			if err != nil {
 				return err
 			}
 		}
+	} else if strings.HasSuffix(pkg, ".tar.gz") || strings.HasSuffix(pkg, ".tgz") {
+		file, err := os.Open(pkg)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		gz, err := gzip.NewReader(file)
+		if err != nil {
+			return err
+		}
+		defer gz.Close()
+		reader := tar.NewReader(gz)
+		var total int64
+		for count := 0; ; count++ {
+			header, err := reader.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			total += header.Size
+			if count > 20000 || header.Size < 0 || header.Size > 1<<30 || total > 2<<30 {
+				return fmt.Errorf("update archive too large")
+			}
+			if header.Typeflag == tar.TypeDir {
+				continue
+			}
+			if header.Typeflag != tar.TypeReg {
+				return fmt.Errorf("non-regular update entry")
+			}
+			if err := writeStaged(stage, header.Name, reader, os.FileMode(header.Mode).Perm(), header.Size); err != nil {
+				return err
+			}
+		}
 	} else {
-		err = os.MkdirAll(filepath.Dir(dst), 0755)
-		if err != nil {
-			return err
+		return fmt.Errorf("unsupported update archive")
+	}
+	content := filepath.Join(stage, "nekobox")
+	for _, name := range []string{"nekobox", "nekobox_core"} {
+		path := filepath.Join(content, name)
+		if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() || fi.Size() == 0 {
+			return fmt.Errorf("incomplete update: missing %s", name)
 		}
-		os.RemoveAll(dst)
-		err = os.Rename(src, dst)
-		if err != nil {
+		if err := os.Chmod(path, 0755); err != nil {
 			return err
 		}
 	}
-	return nil
+	return installTree(content, install, os.Rename)
 }
-/*
-func removeAll(glob string) {
-	files, _ := filepath.Glob(glob)
-	for _, f := range files {
-		os.Remove(f)
+
+func infoSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return -1
 	}
+	return info.Size()
 }
-*/
+
+func writeStaged(stage, name string, reader io.Reader, mode os.FileMode, size int64) error {
+	clean := filepath.Clean(filepath.FromSlash(name))
+	if size < 0 || size > 1<<30 || filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("unsafe update entry: %s", name)
+	}
+	target := filepath.Join(stage, clean)
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode&0755)
+	if err != nil {
+		return err
+	}
+	n, err := io.CopyN(file, reader, size)
+	if err == nil && n != size {
+		err = io.ErrUnexpectedEOF
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
+}

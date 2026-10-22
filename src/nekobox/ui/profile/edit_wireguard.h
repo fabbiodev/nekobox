@@ -5,6 +5,9 @@
 #pragma once
 
 #include <QWidget>
+#include <QMap>
+#include <QLineEdit>
+#include <QCheckBox>
 #include "profile_editor.h"
 #include "ui_edit_wireguard.h"
 
@@ -29,4 +32,7 @@ public:
 private:
     Ui::EditWireguard *ui;
     std::shared_ptr<Configs::ProxyEntity> ent;
+    QMap<QString, QLineEdit *> awg31Fields;
+    QCheckBox *randomTrailers;
+    QCheckBox *disableCookies;
 };

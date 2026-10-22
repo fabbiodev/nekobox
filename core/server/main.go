@@ -50,6 +50,7 @@ func RunCore(addr net.Addr, _debug *bool) {
 	internal.Debug = *_debug
 
 	log.Printf("Ruleset dir is %s", internal.GetRulesetCachedir())
+	log.Printf("Core build: %s", coreBuildDescription())
 
 	boxmain.DisableColor()
 	// RPC

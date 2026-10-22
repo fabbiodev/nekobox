@@ -7,124 +7,73 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"time"
+	"strings"
 )
 
-func LaunchCmd(cmd *exec.Cmd) error {
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+func Launch(path string, args ...string) error {
+	cmd := exec.Command(path, args...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	return cmd.Run()
 }
 
-func Launch(Path string, Args ...string) error {
-	log.Println(Path, Args)
-	cmd := exec.Command(Path, Args...)
-	return LaunchCmd(cmd)
+func run() error {
+	version := flag.String("version", "", "version")
+	chocolatey := flag.String("chocolatey_source", "", "Chocolatey source")
+	winget := flag.Bool("winget_install", false, "install with winget")
+	flag.Bool("verbose", false, "verbose mode")
+	name := flag.String("name", "nekobox", "software name")
+	digest := flag.String("sha256", "", "expected package SHA-256")
+	flag.Parse()
+	args := flag.Args()
+	pkg, install, err := validateArguments(args, *winget)
+	if err != nil {
+		return err
+	}
+	if *winget {
+		if *version == "" {
+			return fmt.Errorf("winget requires a version")
+		}
+		err = Launch("winget", "install", "--exact", "--id", pkg, "--version", *version,
+			"--override", "/S /WINGET=1 /UNPACK=1 /D="+install)
+	} else {
+		if !strings.EqualFold(filepath.Ext(pkg), ".exe") {
+			return fmt.Errorf("expected a Windows installer executable")
+		}
+		if err = verifyPackage(pkg, *digest); err != nil {
+			return err
+		}
+		chocoFlag := "/CHOCOLATEY=0"
+		if *chocolatey != "" {
+			if *version == "" || *name == "" {
+				return fmt.Errorf("Chocolatey requires package name and version")
+			}
+			// Arguments are passed directly, never interpolated into PowerShell.
+			if err = Launch("choco", "install", *name, "--version", *version, "--source", *chocolatey, "--skip-scripts", "-y"); err != nil {
+				return err
+			}
+			chocoFlag = "/CHOCOLATEY=1"
+		}
+		err = Launch(pkg, "/S", "/UNPACK=1", chocoFlag, "/D="+install)
+	}
+	if err != nil {
+		return fmt.Errorf("installer failed (application will not be relaunched): %w", err)
+	}
+	app := filepath.Join(install, "nekobox.exe")
+	if info, err := os.Stat(app); err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("installed application is missing: %s", app)
+	}
+	cmd := exec.Command(app, args[2:]...)
+	cmd.Dir = install
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start updated application: %w", err)
+	}
+	return nil
 }
-
-//func InstallVcRedist() {
-
-//}
 
 func main() {
-	// update & launcher
-	exe, err := os.Executable()
-	if err != nil {
-		panic(err.Error())
-	}
-	log.Println(os.Args)
-
-	version := flag.String("version", "", "version")
-	chocolatey_source := flag.String("chocolatey_source", "", "install with chocolatey from source")
-	winget_install := flag.Bool("winget_install", false, "install with winget")
-	verbose := flag.Bool("verbose", false, "verbose mode")
-	name := flag.String("name", "nekobox", "software name")
-
-	//	nsis_installer_mode := flag.Bool("kill_processes", false, "Kill Processes from directory")
-	//	install_vcredist := flag.Bool("install_vcredist", false, "Install VcRedist")
-	// Parse the flags
-	flag.Parse()
-
-	//	if *install_vcredist {
-	//		InstallVcRedist()
-	//	}
-
-	// Get the positional arguments
-	args := flag.Args()
-	wd := args[1]
-	box := args[0]
-	exe = filepath.Base(os.Args[0])
-	log.Println("exe:", exe, "exe dir:", wd, "box: ", box)
-
-	//	if *nsis_installer_mode {
-	//		KillProcesses(wd)
-	//	}
-
-	time.Sleep(1 * time.Second)
-	// 1. update files
-	LaunchInstaller(box, wd, *version, *chocolatey_source, *winget_install, *verbose, *name)
-	// 2. start
-	os.Chdir(wd)
-	exec.Command("./nekobox.exe", args[2:]...).Start()
-}
-
-func LaunchInstaller(updatePackagePath string, installPath string, version string, chocolatey_source string, winget_install bool, verbose bool, name string) {
-	fmt.Printf("package %s install %s version %s name %s", updatePackagePath, installPath, version, name)
-
-	if winget_install {
-		winget_install = version != "" && updatePackagePath != "" && installPath != ""
-	}
-	if chocolatey_source != "" {
-		if name == "" || version == "" {
-			chocolatey_source = ""
-		}
-	}
-	if winget_install {
-		Launch("winget", "install", "--version", version, updatePackagePath, "--override", "/S /WINGET=1 /UNPACK=1 /D="+filepath.Clean(installPath))
-	} else {
-		var chocolatey_flag string
-		if chocolatey_source != "" {
-			run_chocolatey(version, chocolatey_source, name)
-			chocolatey_flag = "/CHOCOLATEY=1"
-		} else {
-			chocolatey_flag = "/CHOCOLATEY=0"
-		}
-		if updatePackagePath != "" && installPath != "" {
-			Launch(updatePackagePath, "/S", "/UNPACK=1", chocolatey_flag, "/D="+filepath.Clean(installPath))
-		}
-	}
-}
-
-func run_chocolatey(version string, source string, name string) {
-	if source != "" {
-		command := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `
-$source="`+source+`"
-$version="`+version+`"
-$name="`+name+`"
-$IsAdmin = ([Security.Principal.WindowsPrincipal] `+"`"+`
-[Security.Principal.WindowsIdentity]::GetCurrent()
-).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) ;
-    $psi = New-Object System.Diagnostics.ProcessStartInfo ;
-    $psi.FileName = "choco" ;
-    $psi.Arguments = "install `+"`"+`"$name`+"`"+`" --version=`+"`"+`"$version`+"`"+`" --source=`+"`"+`"$source`+"`"+`" --skip-scripts" ;
-
-if (-not $IsAdmin) {
-    Write-Host "Not elevated. Launching as Administrator..." ;
-    $psi.Verb = "runas" ;
-}
-
-try {
-	$proc = [System.Diagnostics.Process]::Start($psi) ;
-	if ($proc) { 
-		$proc.WaitForExit() ; 
-	}
-} catch {
-    Write-Host "Installation failed." ;
-}
-
-exit ;
-`)
-		fmt.Println("<<<<Run Chocolatey Install>>>>")
-		LaunchCmd(command)
+	if err := run(); err != nil {
+		log.Print(err)
+		MessageBoxPlain("NekoBox Updater", err.Error())
+		os.Exit(1)
 	}
 }

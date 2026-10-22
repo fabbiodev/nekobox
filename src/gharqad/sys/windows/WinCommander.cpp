@@ -46,22 +46,27 @@ Returns the return value of the executed command
 */
 
 QString escapeSpecialCharacters(const QString &arg) {
-    QString escapedArg = arg;
-
-    // Escape double quotes
-    escapedArg.replace("\"", "\\\"");  // Replace " with \"
-
-    // Escape other special characters
-    escapedArg.replace("&", "^&");  // Escape &
-    escapedArg.replace("|", "^|");  // Escape |
-    escapedArg.replace("<", "^<");   // Escape <
-    escapedArg.replace(">", "^>");   // Escape >
-    escapedArg.replace("(", "^(");   // Escape (
-    escapedArg.replace(")", "^)");   // Escape )
-    escapedArg.replace("^", "^^");    // Escape ^
-    escapedArg.replace("%", "^^^%");   // Escape % in batch files
-
-    return escapedArg;
+    // ShellExecute receives a Windows command line, not a cmd.exe script.
+    // Caret escaping corrupts paths containing parentheses, &, % or ^.
+    // The caller adds the surrounding quotes; double backslashes before a
+    // literal quote and before that closing quote (Windows argv rules).
+    QString escaped;
+    qsizetype backslashes = 0;
+    for (QChar ch : arg) {
+        if (ch == QLatin1Char('\\')) {
+            ++backslashes;
+            continue;
+        }
+        if (ch == QLatin1Char('"')) {
+            escaped += QString(2 * backslashes + 1, QLatin1Char('\\'));
+        } else {
+            escaped += QString(backslashes, QLatin1Char('\\'));
+        }
+        escaped += ch;
+        backslashes = 0;
+    }
+    escaped += QString(2 * backslashes, QLatin1Char('\\'));
+    return escaped;
 }
 
 uint WinCommander::runProcessElevated(const QString &path,

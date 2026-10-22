@@ -44,6 +44,7 @@
 
 #include <QJsonDocument>
 #include <QMutex>
+#include <QScopeGuard>
 #include <QQueue>
 #include <QWaitCondition>
 #include <qcontainerfwd.h>
@@ -2525,9 +2526,9 @@ void MainWindow::call_updater() {
   tempdir.mkpath("temp");
   QString destinationFilePath = Configs::GetBasePath();
 #ifdef Q_OS_WIN
-  destinationFilePath += "\\temp\\updater.exe";
+  destinationFilePath += "\\temp\\updater-" + QString::number(QCoreApplication::applicationPid()) + ".exe";
 #else
-  destinationFilePath += "/temp/updater";
+  destinationFilePath += "/temp/updater-" + QString::number(QCoreApplication::applicationPid());
 #endif
   if (QFile::copy(sourceFilePath, destinationFilePath)) {
 #ifdef DEBUG_MODE
@@ -5287,6 +5288,8 @@ bool isNewer(QString assetName) {
 #ifndef SKIP_UPDATE_BUTTON
 
 void MainWindow::CheckUpdate(bool button_clicked) {
+  if (!mu_check_update.tryLock()) return;
+  const auto unlockUpdate = qScopeGuard([this] { mu_check_update.unlock(); });
 #ifdef NKR_SOFTWARE_KEYS
   QMutex mut;
   mut.lock();

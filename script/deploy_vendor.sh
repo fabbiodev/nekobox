@@ -36,7 +36,12 @@ rm -fv **/*.so
 rm -fv **/*.a
 rm -fv **/*.dll
 
-git add -f srslist.json global.ini core/updater/vendor SingBox.Version
+git add -f srslist.json global.ini SingBox.Version
+# The updater now uses only the standard library, so `go mod vendor`
+# legitimately produces no vendor directory.
+if [[ -d core/updater/vendor ]]; then
+  git add -f core/updater/vendor
+fi
 git -c user.name="a" -c user.email="my@email.org" commit -am "New Update"
 
 
@@ -52,7 +57,7 @@ sha256sum "$DEPLOYMENT/$archive_standalone.tar.xz" > "$DEPLOYMENT/$archive_stand
 git reset --soft HEAD^1
 for i in srslist.json global.ini core/updater/vendor SingBox.Version
 do
-git rm -rf "$i"
+git rm -rf --ignore-unmatch "$i"
 rm -rf "$i"
 done
 

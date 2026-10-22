@@ -348,6 +348,7 @@ FunctionEnd
 ;==================
 ; MoveFile macro
 ;==================
+Var switch_overwrite
  
     !macro MoveFile sourceFile destinationFile
  
@@ -599,6 +600,7 @@ FunctionEnd
 VIProductVersion "${SOFTWARE_VERSION}"
 VIAddVersionKey "ProductName" "${SOFTWARE_NAME}"
 VIAddVersionKey "ProductVersion" "${SOFTWARE_VERSION}"
+VIAddVersionKey "FileVersion" "${SOFTWARE_VERSION}"
 VIAddVersionKey "CompanyName" "qr243vbi"
 VIAddVersionKey "FileDescription" "Installer for ${SOFTWARE_NAME}"
 VIAddVersionKey "LegalCopyright" "© 2026 qr243vbi"
@@ -614,6 +616,7 @@ Var Winget
 Var Chocolatey
 Var UnpackOnly
 Var NoScript
+Var ProgramDataPath
 
 Var RandomGUID
 Var PID
@@ -932,6 +935,14 @@ Section "Install"
   SetOutPath "$INSTDIR\$RandomGUID"
   SetOverwrite on
 
+  ; Preserve the runnable pair until all new files have been written.
+  ClearErrors
+  IfFileExists "$INSTDIR\nekobox.exe" 0 +2
+    CopyFiles /SILENT "$INSTDIR\nekobox.exe" "$INSTDIR\$RandomGUID\nekobox.previous.exe"
+  IfFileExists "$INSTDIR\nekobox_core.exe" 0 +2
+    CopyFiles /SILENT "$INSTDIR\nekobox_core.exe" "$INSTDIR\$RandomGUID\nekobox_core.previous.exe"
+  IfErrors update_failed
+
   !ifdef DIRECTORY
     File /r  "${DIRECTORY}\nekobox_core.exe"
   !else
@@ -943,8 +954,14 @@ Section "Install"
   ${Else}
     nsExec::ExecToLog '"$INSTDIR\$RandomGUID\nekobox_core.exe" -installer-mode -kill-processes "$INSTDIR" -vcredist-install -ignore-pid "$PID" -ignore-pid "$PPID" -ignore-pid "$PPPID" '
   ${EndIf}
-  
-  !insertmacro MoveFile "$INSTDIR\$RandomGUID\nekobox_core.exe" "$INSTDIR\nekobox_core.exe" 
+  Pop $0
+  ${If} "$0" != "0"
+    Goto update_failed
+  ${EndIf}
+  ClearErrors
+  ; Always install the packaged core, even when a previous file has a newer timestamp.
+  CopyFiles /SILENT "$INSTDIR\$RandomGUID\nekobox_core.exe" "$INSTDIR\nekobox_core.exe"
+  IfErrors update_failed
 ;  ${PowerShellExec} "\
 ;    Write-Host $\"=> $INSTDIR$\" ;				\
 ;	if ($\"$VCRedistNeeded$\" -eq $\"1$\") {					\
@@ -968,9 +985,9 @@ Section "Install"
 
   SetOutPath "$INSTDIR"
   SetOverwrite on
+  ClearErrors
 
   ${If} "$NoScript" != "1"
-  RMDir  "$INSTDIR\$RandomGUID"
   !ifdef DIRECTORY
     File /r /x nekobox_core.exe "${DIRECTORY}\*"
   !else
@@ -983,6 +1000,7 @@ Section "Install"
     File /r  ".\deployment\windows64\*"
   !endif
   ${EndIf}
+  IfErrors update_failed
 
   ${If} "$Winget" == "1"
     WriteINIStr "$INSTDIR\global.ini" "General" "winget_package" "true"
@@ -1016,7 +1034,24 @@ Section "Install"
     !insertmacro RegInteger "Software\Microsoft\Windows\CurrentVersion\Uninstall\nekobox" "NoRepair" 1
     WriteUninstaller "uninstall.exe"
   ${EndIf}
+  IfErrors update_failed
+  ; Cleanup is restricted to this installation's unique staging directory.
+  RMDir /r "$INSTDIR\$RandomGUID"
+  Goto update_done
+update_failed:
+  SetErrorLevel 1
+  Abort "NekoBox update failed. The previous executable pair will be restored."
+update_done:
 SectionEnd
+
+Function .onInstFailed
+  SetErrorLevel 1
+  IfFileExists "$INSTDIR\$RandomGUID\nekobox.previous.exe" 0 +2
+    CopyFiles /SILENT "$INSTDIR\$RandomGUID\nekobox.previous.exe" "$INSTDIR\nekobox.exe"
+  IfFileExists "$INSTDIR\$RandomGUID\nekobox_core.previous.exe" 0 +2
+    CopyFiles /SILENT "$INSTDIR\$RandomGUID\nekobox_core.previous.exe" "$INSTDIR\nekobox_core.exe"
+  ; Retain staging/backup files if Windows still locks a destination.
+FunctionEnd
 
 Section "Uninstall"
 
@@ -1040,8 +1075,10 @@ Section "Uninstall"
     RMDir /r "$LOCALAPPDATA\NekoBox"
   ${EndIf}
   RMDir /r "$LOCALAPPDATA\NekoBox\packetfilter"
-  ${If} "$PROGRAMDATA\NekoBox" != "$INSTDIR"
-    RMDir /r "$PROGRAMDATA\NekoBox"
+  ReadEnvStr $ProgramDataPath "PROGRAMDATA"
+  ${If} "$ProgramDataPath" != ""
+  ${AndIf} "$ProgramDataPath\NekoBox" != "$INSTDIR"
+    RMDir /r "$ProgramDataPath\NekoBox"
   ${EndIf}
 
   Delete "$INSTDIR\uninstall.exe"

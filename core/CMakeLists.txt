@@ -202,7 +202,11 @@ function(run_go_command DIR)
         execute_process(
             COMMAND ${CMAKE_COMMAND} -E chdir "${DIR}" ${ARGN}
             WORKING_DIRECTORY "${DIR}"
+            RESULT_VARIABLE preparation_result
         )
+        if(NOT preparation_result EQUAL 0)
+            message(FATAL_ERROR "Core preparation failed (${preparation_result}): ${joined_args}")
+        endif()
     endif()
 endfunction()
 
@@ -213,6 +217,10 @@ add_env_var("GOROOT" "${GOROOT}")
 add_env_var("CGO_ENABLED" "1")
 add_env_var("GOTOOLCHAIN" "local")
 
+# Incremental builds must follow source/module changes as well as the wrapper.
+file(GLOB_RECURSE CORE_GO_SOURCES CONFIGURE_DEPENDS "${GO_SOURCE_DIR}/server/*.go")
+file(GLOB_RECURSE UPDATER_GO_SOURCES CONFIGURE_DEPENDS "${GO_SOURCE_DIR}/updater/*.go")
+
 # ----------------------------
 # Updater build (optional)
 # ----------------------------
@@ -222,6 +230,7 @@ if(NOT SKIP_UPDATER)
 
     add_custom_command(
         OUTPUT "${DESTDIR}/updater${EXE_SUFFIX}"
+        DEPENDS ${UPDATER_GO_SOURCES} "${GO_SOURCE_DIR}/updater/go.mod"
         COMMAND ${CMAKE_COMMAND} -E env ${GO_ENV}
 				${CMAKE_COMMAND} -E chdir "${GO_SOURCE_DIR}/updater"
                 "${GOCMD}" build ${GO_MOD_FLAG} -buildmode=pie -buildvcs=false -o "${DESTDIR}/updater${EXE_SUFFIX}" -trimpath -ldflags "-w -s"
@@ -247,7 +256,11 @@ execute_process(
     WORKING_DIRECTORY ${GO_SOURCE_DIR}
     OUTPUT_VARIABLE VERSION_SINGBOX
     OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE VERSION_SINGBOX_RESULT
 )
+if(NOT VERSION_SINGBOX_RESULT EQUAL 0 OR VERSION_SINGBOX STREQUAL "")
+    message(FATAL_ERROR "Failed to resolve the pinned sing-box module")
+endif()
 
 set(LDFLAGS
     "-w -s -X github.com/sagernet/sing-box/constant.Version=${VERSION_SINGBOX} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -checklinkname=0"
@@ -307,7 +320,8 @@ endif()
 
 add_custom_command(
     OUTPUT ${DESTDIR}/nekobox_core${EXE_SUFFIX}
-    DEPENDS ${WRAPPER_DEP_FILE}
+    DEPENDS ${WRAPPER_DEP_FILE} ${CORE_GO_SOURCES}
+            "${GO_SOURCE_DIR}/server/go.mod" "${GO_SOURCE_DIR}/server/go.sum"
     COMMAND ${CMAKE_COMMAND} -E env ${GO_ENV}
 			${CMAKE_COMMAND} -E chdir ${GO_SOURCE_DIR}/server
             "${GOCMD}" build ${GO_MOD_FLAG} -buildmode=pie -buildvcs=false -v -o ${DESTDIR}/nekobox_core${EXE_SUFFIX} -trimpath -ldflags "${LDFLAGS}" -tags "${TAGS}"

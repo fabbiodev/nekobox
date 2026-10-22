@@ -1,9 +1,10 @@
 module nekobox_core
 
-go 1.25.0
+go 1.26.10
 
 require (
 	github.com/Microsoft/go-winio v0.6.2
+	github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20260828
 	github.com/apache/thrift v0.24.1-0.20260712131850-4ade7f7ad807
 	github.com/dustin/go-humanize v1.0.1
 	github.com/giert/taskmaster v0.1.1
@@ -16,6 +17,7 @@ require (
 	github.com/sagernet/sing-box v1.13.15
 	github.com/sagernet/sing-tun v0.8.12-0.20260727151122-3a09076491df
 	github.com/spf13/cobra v1.10.2
+	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
 	golang.org/x/crypto v0.54.0
 	golang.org/x/sys v0.47.0
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
@@ -163,7 +165,6 @@ require (
 	go.uber.org/zap v1.27.1 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
-	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93 // indirect
 	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/net v0.57.0 // indirect

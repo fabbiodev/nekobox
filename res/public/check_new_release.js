@@ -15,13 +15,15 @@ var release_download_url = '';
 var archive_name = '';
 var latest_tag_name = '';
 var keep_running = false;
+var release_digest = '';
 
 log("Checking new version", "Info");
 
 // [major, minor, patch, stage, stageNum, revision]; stable stage = 4 so X.Y.Z > X.Y.Z-beta.
 // A numeric 4th field is the mod revision (X.Y.Z.W), compared after the base.
 function parseVer(str) {
-    const p = str.trim().replace('-', '.').split('.');
+    const p = str.trim().replace(/^v/, '').replace('-', '.').split('.');
+    if (!/^\d+\.\d+\.\d+(?:[.-](?:\d+|alpha|beta|rc)(?:\.\d+)?)?$/.test(str.trim().replace(/^v/, ''))) return null;
     if (p.length < 3) return null;
     const v = [parseInt(p[0], 10), parseInt(p[1], 10), parseInt(p[2], 10), 4, 0, 0];
     if (p.length > 3) {
@@ -95,7 +97,7 @@ function getLatestWingetVersion(packageId) {
     });
 
     // Latest version is the last one
-    return versions[versions.length - 1];
+    return versions[0];
 }
 
 var chocolatey_package = false;
@@ -172,7 +174,7 @@ if (resp_error) {
         );
     }
 } else {
-    var array = JSON.parse(resp.text);
+    var array = Array.isArray(data) ? data : [];
     var bound = '';
 
     if (winget_package) {
@@ -180,6 +182,7 @@ if (resp_error) {
     }
 
     for (let release of array) {
+        if (release.draft || !Array.isArray(release.assets)) continue;
         if (!allow_beta_update) {
             if (release["prerelease"]) {
                 continue;
@@ -206,6 +209,7 @@ if (resp_error) {
                         latest_tag_name = release['tag_name'];
                         release_array.push([latest_tag_name, release_note]);
                         release_download_url = asset["browser_download_url"];
+                        release_digest = asset["digest"] || '';
                         exitFlag = true;
                         is_newer = isNewerAsset(assets_name);
                         stopFlag = !is_newer;
@@ -264,7 +268,18 @@ if (resp_error) {
             is_newer = false;
             let errors = '';
             if (!winget_package) {
-                errors = download(release_download_url, archive_name, true);
+                if (!/^sha256:[0-9a-f]{64}$/i.test(release_digest)) {
+                    errors = 'The release has no valid SHA-256 digest. Please use the release page.';
+                } else {
+                    // Reuse a completed package only if its bytes still match this release.
+                    if (!window.verify_file(archive_name, release_digest)) {
+                        errors = download(release_download_url, archive_name, false);
+                    }
+                    if (!errors && !window.verify_file(archive_name, release_digest)) {
+                        errors = 'Update SHA-256 verification failed. The application was not changed.';
+                    }
+                    if (!errors) options['sha256'] = release_digest.slice(7);
+                }
                 if (chocolatey_package) {
                     let nupkg_errors = download(
                         "https://github.com/fabbiodev/nekobox/releases/download/" +

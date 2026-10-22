@@ -1,0 +1,57 @@
+name: Core regression checks
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'core/**'
+      - '.github/workflows/core-regression.yml'
+      - '.github/workflows/build.yml'
+  pull_request:
+    paths:
+      - 'core/**'
+      - '.github/workflows/core-regression.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  awg:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check update selection and checksum failure paths
+        run: node script/tests/updater.test.cjs
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.10'
+          cache-dependency-path: core/server/go.sum
+      - name: Configure private core access
+        shell: bash
+        env:
+          CORE_REPO_DEPLOY_KEY: ${{ secrets.CORE_REPO_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$CORE_REPO_DEPLOY_KEY"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$CORE_REPO_DEPLOY_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts"
+          git config --global url."git@github.com:1maxwarner/nekobox-sing-box-core".insteadOf "https://github.com/1maxwarner/nekobox-sing-box-core"
+      - name: Exercise real AWG tunnels and reject malformed profiles
+        working-directory: core/server
+        env:
+          GOPRIVATE: github.com/1maxwarner/nekobox-sing-box-core
+          GONOSUMDB: github.com/1maxwarner/nekobox-sing-box-core
+          CGO_ENABLED: '0'
+        run: go test -tags with_awg,with_gvisor ./internal/awg ./internal/coreinclude -count=20 -timeout=120s
+      - name: Exercise update validation and rollback
+        working-directory: core/updater
+        env:
+          CGO_ENABLED: '0'
+        run: go test ./... -count=10 -timeout=90s
