@@ -57,6 +57,7 @@ type Box struct {
 	internalService []adapter.LifecycleService
 	done            chan struct{}
 	closeOnce       sync.Once
+	closeCancelOnce sync.Once
 	closeErr        error
 	closeTask       lifecycle.CloseTask
 

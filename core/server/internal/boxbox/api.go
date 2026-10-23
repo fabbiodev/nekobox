@@ -8,11 +8,18 @@ import (
 )
 
 func (s *Box) BeginClose(cancel context.CancelFunc, logFunc func(v ...any)) <-chan struct{} {
-	return s.closeTask.Begin(func() error {
-		start := time.Now()
+	// Signal shutdown before returning, even if the close worker has not been
+	// scheduled yet. Only resource teardown belongs in the background worker.
+	s.closeCancelOnce.Do(func() {
+		if s.cancel != nil {
+			s.cancel()
+		}
 		if cancel != nil {
 			cancel()
 		}
+	})
+	return s.closeTask.Begin(func() error {
+		start := time.Now()
 		err := s.Close()
 		logFunc("[Info] sing-box closed in", fmt.Sprintf("%d ms", time.Since(start).Milliseconds()))
 		return err

@@ -35,10 +35,22 @@ func TestCloseTimeoutRemainsPendingAndIdempotent(t *testing.T) {
 	}
 	slow := &slowCloseService{release: make(chan struct{})}
 	instance.internalService = append(instance.internalService, slow)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(slow.release) }) }
+	t.Cleanup(func() {
+		release()
+		if err := instance.CloseWithTimeout(nil, 5*time.Second, func(...any) {}); err != nil {
+			t.Error(err)
+		}
+	})
 	var cancelCalls atomic.Int32
 	cancel := func() { cancelCalls.Add(1) }
 	discard := func(...any) {}
 	done := instance.BeginClose(cancel, discard)
+	// No sleep or scheduler deadline: cancellation is a synchronous contract.
+	if !errors.Is(instance.Context().Err(), context.Canceled) || cancelCalls.Load() != 1 {
+		t.Fatal("BeginClose returned before cancelling background tasks")
+	}
 	if err = instance.CloseWithTimeout(cancel, time.Millisecond, discard); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("slow close reported success: %v", err)
 	}
@@ -60,7 +72,7 @@ func TestCloseTimeoutRemainsPendingAndIdempotent(t *testing.T) {
 			}
 		}()
 	}
-	close(slow.release)
+	release()
 	wg.Wait()
 	if err = instance.Close(); err != nil {
 		t.Fatal(err)
